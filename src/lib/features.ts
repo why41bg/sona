@@ -43,7 +43,12 @@ import { updateGameModeFilter } from '@/lib/features/game-mode-filter'
 import { updateQuickLobbyMode } from '@/lib/features/quick-lobby-mode'
 import { preloadChampSelectTierBadgeData, updateChampSelectTierBadge } from '@/lib/features/champselect-tier-badge'
 import { setAvailabilityHijackEnabled, setHideTFTEnabled, setHideRightNavTextEnabled } from '@/lib/injections'
-import { calculateSonaPlayerStrengthScore, shouldSkipSonaStrengthGame, type SonaPlayerStrengthScore } from '@/lib/player-strength-score'
+import {
+  calculateSonaPlayerStrengthScore,
+  filterSonaStrengthGamesByQueue,
+  shouldSkipSonaStrengthGame,
+  type SonaPlayerStrengthScore,
+} from '@/lib/player-strength-score'
 import { translate } from '@/i18n'
 
 // ==================== 共享：查询队友胜率 ====================
@@ -160,7 +165,8 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
         count: FETCH_COUNT,
         tag: tag || undefined,
       })
-      const games = resp.games ?? []
+      const receivedGames = resp.games ?? []
+      const games = filterSonaStrengthGamesByQueue(receivedGames, currentQueueId)
 
       const matchStats: Array<{ kills: number; deaths: number; assists: number; win: boolean }> = []
 
@@ -191,7 +197,14 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
 
       const total = matchStats.length
       const strengthScore = calculateSonaPlayerStrengthScore(games, puuid)
-      logger.info('[TeamStats] %s → SGP 拉取 %d 场 (tag=%s)', gameName, total, tag || '全部')
+      logger.info(
+        '[TeamStats] %s → 当前模式有效 %d 场 / 返回 %d 场 (queueId=%d, tag=%s)',
+        gameName,
+        total,
+        receivedGames.length,
+        currentQueueId,
+        tag || '全部',
+      )
 
       return {
         floor: i + 1,

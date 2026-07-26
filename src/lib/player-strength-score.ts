@@ -38,7 +38,7 @@ export interface SonaGameStrengthScore {
   role: SonaStrengthRole
   win: boolean
   placement: number
-  /** WeGame 风格展示分，约 3.0 - 19.9。 */
+  /** WeGame 风格展示分，范围 3.0 - 16.0。 */
   score: number
   breakdown: SonaScoreBreakdown
   metrics: {
@@ -56,7 +56,7 @@ export interface SonaGameStrengthScore {
 
 export interface SonaPlayerStrengthScore {
   puuid: string
-  /** WeGame 风格综合展示分，约 3.0 - 19.9。 */
+  /** WeGame 风格综合展示分，范围 3.0 - 16.0。 */
   score: number
   /** 未经过样本置信度、稳定性和趋势修正的原始展示分。 */
   rawScore: number
@@ -107,7 +107,9 @@ const INTERNAL_MIN_SCORE = 0
 const INTERNAL_MAX_SCORE = 100
 const INTERNAL_NEUTRAL_SCORE = 50
 const DISPLAY_MIN_SCORE = 3.0
-const DISPLAY_MAX_SCORE = 19.9
+const DISPLAY_MAX_SCORE = 16.0
+/** 放大中段表现差距，让差/好玩家更容易落在个位数/两位数两侧。 */
+const DISPLAY_CONTRAST = 1.22
 const DISPLAY_NEUTRAL_SCORE = toDisplayScore(INTERNAL_NEUTRAL_SCORE)
 
 const DEFAULT_OPTIONS: SonaStrengthScoreOptions = {
@@ -160,8 +162,10 @@ export function calculateSonaPlayerStrengthScore(
 
   const consistencyAdjustment = clamp((consistencyScore - 50) * 0.012, -0.6, 0.6)
   const trendAdjustment = clamp((trendScore - 50) * 0.01, -0.5, 0.5)
+  // 置信度仍用于抑制小样本噪声，但最低保留 72% 的真实差距，避免所有人都挤在中性分附近。
+  const confidenceScale = 0.57 + confidence * 0.43
   const score = clamp(
-    DISPLAY_NEUTRAL_SCORE + (rawScore - DISPLAY_NEUTRAL_SCORE) * confidence + consistencyAdjustment + trendAdjustment,
+    DISPLAY_NEUTRAL_SCORE + (rawScore - DISPLAY_NEUTRAL_SCORE) * confidenceScale + consistencyAdjustment + trendAdjustment,
     DISPLAY_MIN_SCORE,
     DISPLAY_MAX_SCORE,
   )
@@ -291,6 +295,24 @@ export function shouldSkipSonaStrengthGame(
   return shouldSkipSonaGameForParticipant(game, participant, { ...DEFAULT_OPTIONS, ...options })
 }
 
+/**
+ * 对 SGP 返回结果做当前队列的本地二次校验。
+ *
+ * 正常情况下服务端会依据 `q_<queueId>` tag 过滤；这里额外兜住部分大区忽略 tag、
+ * 以及 SGP 降级到原生 LCU 历史接口时返回混合模式数据的情况。
+ */
+export function filterSonaStrengthGamesByQueue(
+  games: SgpGameSummaryLol[],
+  queueId: number,
+): SgpGameSummaryLol[] {
+  if (!Number.isFinite(queueId) || queueId <= 0) return games
+
+  const queueTag = `q_${queueId}`
+  return games.filter((game) => {
+    return game.json.queueId === queueId || game.metadata.tags?.includes(queueTag)
+  })
+}
+
 export function calculateSonaTeamStrengthScore(
   players: Array<SonaPlayerStrengthScore | null | undefined>,
 ): SonaTeamStrengthScore | null {
@@ -318,13 +340,13 @@ export function calculateSonaTeamStrengthScore(
 }
 
 export function getSonaStrengthGrade(score: number): SonaStrengthGrade {
-  if (score >= 16.5) return 'legendary'
-  if (score >= 14.5) return 'carry'
-  if (score >= 12.8) return 'strong'
-  if (score >= 11.2) return 'reliable'
-  if (score >= 9.8) return 'balanced'
-  if (score >= 8.2) return 'unstable'
-  if (score >= 6.5) return 'risky'
+  if (score >= 15.0) return 'legendary'
+  if (score >= 13.5) return 'carry'
+  if (score >= 12.0) return 'strong'
+  if (score >= 10.8) return 'reliable'
+  if (score >= 9.5) return 'balanced'
+  if (score >= 8.0) return 'unstable'
+  if (score >= 6.3) return 'risky'
   return 'critical'
 }
 
@@ -377,10 +399,10 @@ function calculateWinScore(game: SgpGameSummaryLol, participant: SgpParticipantL
     if (placement <= 1) return 100
     if (placement <= 2) return 86
     if (placement <= 4) return 64
-    return 35
+    return 18
   }
 
-  return participant.win ? 100 : 35
+  return participant.win ? 100 : 18
 }
 
 function calculateDamageScore(
@@ -580,8 +602,8 @@ function winsorizeScores(scores: number[]): number[] {
   if (scores.length < 8) return scores
 
   const sorted = [...scores].sort((a, b) => a - b)
-  const low = percentile(sorted, 0.1)
-  const high = percentile(sorted, 0.9)
+  const low = percentile(sorted, 0.05)
+  const high = percentile(sorted, 0.95)
   return scores.map((score) => clamp(score, low, high))
 }
 
@@ -684,7 +706,8 @@ function toPercent(value: number): number {
 
 function toDisplayScore(internalScore: number): number {
   const normalized = clamp(internalScore, INTERNAL_MIN_SCORE, INTERNAL_MAX_SCORE) / INTERNAL_MAX_SCORE
-  return DISPLAY_MIN_SCORE + normalized * (DISPLAY_MAX_SCORE - DISPLAY_MIN_SCORE)
+  const contrasted = clamp(0.5 + (normalized - 0.5) * DISPLAY_CONTRAST, 0, 1)
+  return DISPLAY_MIN_SCORE + contrasted * (DISPLAY_MAX_SCORE - DISPLAY_MIN_SCORE)
 }
 
 function formatPercent(value: number): string {

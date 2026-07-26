@@ -10,7 +10,14 @@ import {
   type SummonerNameGradientEffect,
 } from '@/lib/features/beautify-client/avatar-status-sync'
 
-const PLAYER_NAME_SELECTORS = ['span.player-name__game-name', '.player-name-wrapper']
+const PROFILE_NAME_SELECTOR = 'span.player-name__game-name'
+const CHAMP_SELECT_NAME_SELECTOR = '.party.visible .summoner-wrapper.visible .player-name-wrapper'
+const FRIEND_NAME_SELECTORS = [
+  '.lol-social-lower-pane-container lol-social-roster-member .member-name',
+  '.lol-social-lower-pane-container [class*="lol-social-roster-member"] .member-name',
+]
+const FRIEND_NAME_SELECTOR = FRIEND_NAME_SELECTORS.join(', ')
+const PLAYER_NAME_SELECTORS = [PROFILE_NAME_SELECTOR, CHAMP_SELECT_NAME_SELECTOR, ...FRIEND_NAME_SELECTORS]
 const PLAYER_NAME_SELECTOR = PLAYER_NAME_SELECTORS.join(', ')
 const FRIENDS_URI = '/lol-chat/v1/friends'
 const EFFECT_ATTR = 'data-sona-name-gradient'
@@ -40,6 +47,7 @@ let ownSummonerId = ''
 let ownNames = new Set<string>()
 let effectsByPuuid = new Map<string, SummonerNameGradientEffect>()
 let effectsBySummonerId = new Map<string, SummonerNameGradientEffect>()
+let effectsByFriendId = new Map<string, SummonerNameGradientEffect>()
 let effectsByName = new Map<string, SummonerNameGradientEffect>()
 let champSelectPlayersByCellId = new Map<string, ChampSelectPlayerIdentity>()
 let champSelectMyTeamOrder: ChampSelectPlayerIdentity[] = []
@@ -59,6 +67,8 @@ let friendRefreshPromise: Promise<void> | null = null
 let lobbyRefreshPromise: Promise<void> | null = null
 let statusSyncPromise: Promise<void> | null = null
 let ownIdentityPromise: Promise<void> | null = null
+let identityMutationObserver: MutationObserver | null = null
+let identityMutationFrame: number | null = null
 let ownIdentityAttempt = 0
 let startupProbeAttempt = 0
 let lastDomScanSignature = ''
@@ -211,6 +221,15 @@ function getChampSelectIdentityByDomOrder(element: Element): ChampSelectPlayerId
   return slotId ? orderedPlayers[Number(slotId)] ?? null : null
 }
 
+function getChampSelectIdentityForElement(element: Element): ChampSelectPlayerIdentity | null {
+  // Ember 会复用节点并留下旧属性；当前 Session 与 DOM 左右楼层顺序才是最高优先级。
+  const orderedIdentity = getChampSelectIdentityByDomOrder(element)
+  if (orderedIdentity) return orderedIdentity
+
+  const cellId = getElementCellId(element)
+  return cellId ? champSelectPlayersByCellId.get(cellId) ?? null : null
+}
+
 function getEffectForIdentity(identity: ChampSelectPlayerIdentity): SummonerNameGradientEffect | null {
   if (identity.isSelf || (identity.puuid && identity.puuid === ownPuuid)
     || (identity.summonerId && identity.summonerId === ownSummonerId)) {
@@ -232,7 +251,53 @@ function getEffectForIdentity(identity: ChampSelectPlayerIdentity): SummonerName
   return null
 }
 
+function getFriendEffectForElement(element: HTMLElement): SummonerNameGradientEffect | null {
+  const member = element.closest('lol-social-roster-member, [class*="lol-social-roster-member"]')
+  if (!member) return null
+
+  const friendIdAttributes = ['data-friend-id', 'friend-id', 'data-id', 'id']
+  for (const attributeName of friendIdAttributes) {
+    const friendId = normalize(member.getAttribute(attributeName))
+    if (!friendId) continue
+
+    const directEffect = effectsByFriendId.get(friendId)
+    if (directEffect) return directEffect
+
+    const puuidFromChatId = friendId.endsWith('@pvp.net') ? friendId.slice(0, -'@pvp.net'.length) : ''
+    if (puuidFromChatId) {
+      const puuidEffect = effectsByPuuid.get(puuidFromChatId)
+      if (puuidEffect) return puuidEffect
+    }
+  }
+
+  const puuid = getElementPuuid(member)
+  if (puuid) {
+    const effect = effectsByPuuid.get(puuid)
+    if (effect) return effect
+  }
+
+  const summonerId = getElementSummonerId(member)
+  if (summonerId) {
+    const effect = effectsBySummonerId.get(summonerId)
+    if (effect) return effect
+  }
+
+  // 好友栏稳定展示 gameName；与开黑好友分组使用同一套 DOM 名字匹配兜底。
+  const memberName = normalize(element.textContent)
+  return memberName ? effectsByName.get(memberName) ?? null : null
+}
+
 function getEffectForElement(element: HTMLElement): SummonerNameGradientEffect | null {
+  if (element.matches(CHAMP_SELECT_NAME_SELECTOR)) {
+    const identity = getChampSelectIdentityForElement(element)
+    // 选人阶段禁止继续按节点旧属性/旧文本猜身份，避免 Ember 复用后把好友特效串给陌生人。
+    return identity ? getEffectForIdentity(identity) : null
+  }
+
+  if (element.matches(FRIEND_NAME_SELECTOR)) {
+    return getFriendEffectForElement(element)
+  }
+
   const puuid = getElementPuuid(element)
   if (puuid) {
     if (puuid === ownPuuid) return getOwnEffect()
@@ -244,21 +309,6 @@ function getEffectForElement(element: HTMLElement): SummonerNameGradientEffect |
   if (summonerId) {
     if (summonerId === ownSummonerId) return getOwnEffect()
     const effect = effectsBySummonerId.get(summonerId)
-    if (effect) return effect
-  }
-
-  const cellId = getElementCellId(element)
-  if (cellId) {
-    const identity = champSelectPlayersByCellId.get(cellId)
-    if (identity) {
-      const effect = getEffectForIdentity(identity)
-      if (effect) return effect
-    }
-  }
-
-  const orderedIdentity = getChampSelectIdentityByDomOrder(element)
-  if (orderedIdentity) {
-    const effect = getEffectForIdentity(orderedIdentity)
     if (effect) return effect
   }
 
@@ -300,15 +350,17 @@ function tryApplySummonerNameEffects(): boolean {
       applyElementEffect(element, effect)
       appliedCount++
     }
-    else if (styledElements.has(element)) clearElementEffect(element)
+    else if (styledElements.has(element) || element.hasAttribute(EFFECT_ATTR)) clearElementEffect(element)
   })
 
   Array.from(styledElements).forEach((element) => {
     if (!element.isConnected) styledElements.delete(element)
+    else if (!element.matches(PLAYER_NAME_SELECTOR)) clearElementEffect(element)
   })
 
-  const profileNameCount = document.querySelectorAll('span.player-name__game-name').length
-  const champSelectNameCount = document.querySelectorAll('.player-name-wrapper').length
+  const profileNameCount = document.querySelectorAll(PROFILE_NAME_SELECTOR).length
+  const champSelectNameCount = document.querySelectorAll(CHAMP_SELECT_NAME_SELECTOR).length
+  const friendNameCount = document.querySelectorAll(FRIEND_NAME_SELECTOR).length
   const scanSignature = [
     config.enabled,
     profileNameCount,
@@ -318,20 +370,24 @@ function tryApplySummonerNameEffects(): boolean {
     Boolean(ownSummonerId),
     effectsByPuuid.size,
     effectsBySummonerId.size,
+    effectsByFriendId.size,
     champSelectPlayersByCellId.size,
     lobbyPlayersByName.size,
+    friendNameCount,
   ].join(':')
   if (scanSignature !== lastDomScanSignature) {
     lastDomScanSignature = scanSignature
     logger.debug(
-      '[NameEffect] DOM scan: enabled=%s profileTargets=%d champSelectTargets=%d applied=%d ownIdentity=%s remotePuuids=%d remoteSummonerIds=%d champSelectPlayers=%d lobbyNames=%d',
+      '[NameEffect] DOM scan: enabled=%s profileTargets=%d champSelectTargets=%d friendTargets=%d applied=%d ownIdentity=%s remotePuuids=%d remoteSummonerIds=%d remoteFriendIds=%d champSelectPlayers=%d lobbyNames=%d',
       config.enabled,
       profileNameCount,
       champSelectNameCount,
+      friendNameCount,
       appliedCount,
       ownPuuid && ownSummonerId ? 'ready' : 'waiting',
       effectsByPuuid.size,
       effectsBySummonerId.size,
+      effectsByFriendId.size,
       champSelectPlayersByCellId.size,
       lobbyPlayersByName.size,
     )
@@ -340,6 +396,9 @@ function tryApplySummonerNameEffects(): boolean {
 }
 
 function indexFriendEffect(friend: ChatFriend, effect: SummonerNameGradientEffect) {
+  const friendId = normalize(friend.id)
+  if (friendId) effectsByFriendId.set(friendId, effect)
+
   const puuid = normalize(friend.puuid)
   if (puuid) effectsByPuuid.set(puuid, effect)
 
@@ -363,9 +422,11 @@ async function refreshFriendEffects() {
     .then((friends) => {
       const nextByPuuid = new Map<string, SummonerNameGradientEffect>()
       const nextBySummonerId = new Map<string, SummonerNameGradientEffect>()
+      const nextByFriendId = new Map<string, SummonerNameGradientEffect>()
       const nextByName = new Map<string, SummonerNameGradientEffect>()
       effectsByPuuid = nextByPuuid
       effectsBySummonerId = nextBySummonerId
+      effectsByFriendId = nextByFriendId
       effectsByName = nextByName
 
       let sharedEffectCount = 0
@@ -377,11 +438,13 @@ async function refreshFriendEffects() {
         }
       })
       logger.debug(
-        '[NameEffect] Friend payload refresh: friends=%d effects=%d puuids=%d summonerIds=%d',
+        '[NameEffect] Friend payload refresh: friends=%d effects=%d puuids=%d summonerIds=%d friendIds=%d names=%d',
         friends.length,
         sharedEffectCount,
         effectsByPuuid.size,
         effectsBySummonerId.size,
+        effectsByFriendId.size,
+        effectsByName.size,
       )
       tryApplySummonerNameEffects()
     })
@@ -627,6 +690,60 @@ function scheduleStatusSync(delay = 250) {
   }, delay)
 }
 
+function scheduleIdentityMutationScan() {
+  if (identityMutationFrame != null) return
+  identityMutationFrame = window.requestAnimationFrame(() => {
+    identityMutationFrame = null
+    tryApplySummonerNameEffects()
+  })
+}
+
+function startIdentityMutationObserver() {
+  if (identityMutationObserver) return
+
+  identityMutationObserver = new MutationObserver((mutations) => {
+    const shouldScan = mutations.some((mutation) => {
+      if (mutation.type === 'attributes') {
+        if (mutation.attributeName !== 'class') return true
+
+        const target = mutation.target
+        return target instanceof Element && (
+          target.matches('.party, .summoner-wrapper, .player-name-wrapper, lol-social-roster-member')
+          || Boolean(target.closest('.summoner-wrapper, lol-social-roster-member, [class*="lol-social-roster-member"]'))
+        )
+      }
+
+      const parent = mutation.target.parentElement
+      return Boolean(parent?.closest(PLAYER_NAME_SELECTOR))
+    })
+    if (shouldScan) scheduleIdentityMutationScan()
+  })
+  identityMutationObserver.observe(document.body, {
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: [
+      'puuid',
+      'data-puuid',
+      'summoner-id',
+      'data-summoner-id',
+      'summonerid',
+      'data-summonerid',
+      'cell-id',
+      'data-cell-id',
+      'cellid',
+      'data-cellid',
+      'slot-id',
+      'data-slot-id',
+      'friend-id',
+      'data-friend-id',
+      'data-id',
+      'class',
+    ],
+  })
+  logger.debug('[NameEffect] Identity mutation observer attached')
+}
+
 function scheduleStartupProbe() {
   if (startupProbeTimer != null || startupProbeAttempt >= 15) return
   const delay = startupProbeAttempt < 2 ? 500 : 2000
@@ -650,6 +767,7 @@ export function initSummonerNameEffect() {
   registered = true
   logger.info('[NameEffect] Initializing name effects')
   injector.register(tryApplySummonerNameEffects)
+  startIdentityMutationObserver()
   friendsUnsub = lcu.observe(FRIENDS_URI, () => scheduleFriendRefresh())
   ownStatusUnsub = lcu.observe(LcuEventUri.CHAT_ME, () => {
     if (!ownPuuid || !ownSummonerId) void loadOwnIdentity()

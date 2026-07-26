@@ -6,7 +6,7 @@ import { lcu, queueIdToTag } from '@/lib/lcu'
 import { store } from '@/lib/store'
 import { getChampIcon } from '@/lib/assets'
 import { getRating } from '@/lib/features'
-import { shouldSkipSonaStrengthGame } from '@/lib/player-strength-score'
+import { filterSonaStrengthGamesByQueue, shouldSkipSonaStrengthGame } from '@/lib/player-strength-score'
 import { useI18n } from '@/i18n'
 import type { GameflowTeamPlayer, PlayerChampionSelection } from '@/types/lcu'
 import '@/styles/GameAnalysisModal.css'
@@ -316,7 +316,7 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
               return { ...placeholder, summonerName, rankText, rankColor, rating: '' }
             }
 
-            const games = sgpResp.games
+            const games = filterSonaStrengthGamesByQueue(sgpResp.games, queueId)
             let total = 0, wins = 0, totalK = 0, totalD = 0, totalA = 0
             const recentGames: RecentGame[] = []
             for (const game of games) {

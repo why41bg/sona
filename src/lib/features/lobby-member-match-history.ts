@@ -5,7 +5,11 @@ import { MatchHistoryModal } from '@/components/ui/MatchHistoryModal'
 import { injector } from '@/lib/InjectorManager'
 import { lcu, LcuEventUri, queueIdToTag } from '@/lib/lcu'
 import type { LCUEventMessage, Lobby } from '@/lib/lcu'
-import { calculateSonaPlayerStrengthScore, shouldSkipSonaStrengthGame } from '@/lib/player-strength-score'
+import {
+  calculateSonaPlayerStrengthScore,
+  filterSonaStrengthGamesByQueue,
+  shouldSkipSonaStrengthGame,
+} from '@/lib/player-strength-score'
 import { store } from '@/lib/store'
 
 const SONA_LOBBY_HISTORY_ATTR = 'data-sona-lobby-history'
@@ -147,7 +151,8 @@ async function doRefreshLobbyMemberStats() {
         count: store.get('lobbyEnhancementFetchCount') || 50,
         tag: tag || undefined,
       })
-      const games = resp.games ?? []
+      const receivedGames = resp.games ?? []
+      const games = filterSonaStrengthGamesByQueue(receivedGames, lobbyMemberHistoryQueueId)
       let total = 0
       let wins = 0
       let kills = 0
@@ -174,6 +179,13 @@ async function doRefreshLobbyMemberStats() {
         score: strengthScore?.score ?? null,
         total,
       })
+      logger.debug(
+        '[LobbyHistory] %s 当前模式有效 %d 场 / 返回 %d 场 (queueId=%d)',
+        member.name,
+        total,
+        receivedGames.length,
+        lobbyMemberHistoryQueueId,
+      )
     } catch (err) {
       logger.debug('[LobbyHistory] 拉取成员战绩失败: %s', member.name, err)
     }
