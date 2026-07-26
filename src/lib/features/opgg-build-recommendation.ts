@@ -26,6 +26,7 @@ import {
   type OpggMode,
   type OpggNormalModeChampion,
   type OpggPosition,
+  type OpggRankedPosition,
   type OpggTier,
   type OpggItemBuild,
 } from '@/lib/opgg-api'
@@ -66,6 +67,7 @@ const SELECTABLE_OPGG_TIERS: OpggTier[] = [
 ]
 // 匹配/排位识别不到分路时，按「上中打野下路辅助」顺序全部写入
 const RANKED_ALL_POSITIONS: OpggPosition[] = ['top', 'mid', 'jungle', 'adc', 'support']
+const FALLBACK_OPGG_POSITION: OpggPosition = 'mid'
 
 interface RecommendationCacheEntry {
   key: string
@@ -83,6 +85,7 @@ let champSelectUnsub: (() => void) | null = null
 let runePagePollTimer: number | null = null
 let lastPolledRuneKey = ''
 let lastPolledRuneSignature = ''
+let contextRefreshToken = 0
 let championLockPollTimer: number | null = null
 let championLockPollAttempts = 0
 let injectRegistered = false
@@ -97,6 +100,7 @@ let currentContext: RecommendationContext = {
 let currentChampionLocked = false
 const boundElements: Array<{ el: HTMLElement; handler: EventListener; originalText: string }> = []
 const recommendationCache = new Map<string, RecommendationCacheEntry>()
+const commonPositionMapCache = new Map<OpggTier, Promise<Map<number, OpggPosition>>>()
 let outsideCloseHandler: ((event: MouseEvent) => void) | null = null
 let activePanelKey = ''
 let panelReactRoot: Root | null = null
@@ -147,7 +151,7 @@ function isLocalChampionLocked(session: ChampSelectSession): boolean {
 }
 
 function mapAssignedPosition(position: string | undefined): OpggPosition {
-  switch (position) {
+  switch (position?.trim().toLowerCase()) {
     case 'top':
       return 'top'
     case 'jungle':
@@ -157,6 +161,7 @@ function mapAssignedPosition(position: string | undefined): OpggPosition {
       return 'mid'
     case 'bottom':
     case 'bot':
+    case 'adc':
       return 'adc'
     case 'utility':
     case 'support':
@@ -164,6 +169,105 @@ function mapAssignedPosition(position: string | undefined): OpggPosition {
     default:
       return 'none'
   }
+}
+
+function isRankedQueue(queueId: number): boolean {
+  const queue = getQueue(queueId)
+  if (typeof queue?.isRanked === 'boolean') return queue.isRanked
+  return queueId === 420 || queueId === 440
+}
+
+function getPositionPopularity(position: OpggRankedPosition): number {
+  const roleRate = Number(position.stats?.role_rate)
+  if (Number.isFinite(roleRate)) return roleRate
+  const pickRate = Number(position.stats?.pick_rate)
+  return Number.isFinite(pickRate) ? pickRate : 0
+}
+
+function ensureCommonPositionMap(tier: OpggTier): Promise<Map<number, OpggPosition>> {
+  const cached = commonPositionMapCache.get(tier)
+  if (cached) return cached
+
+  const promise = opggApi.getChampionsTier({
+    region: 'global',
+    mode: 'ranked',
+    tier,
+  }).then((summary) => {
+    const positionsByChampion = new Map<number, OpggPosition>()
+
+    for (const champion of summary.data) {
+      const rawPositions = (champion as { positions?: unknown }).positions
+      if (!Array.isArray(rawPositions)) continue
+
+      const mostCommon = (rawPositions as OpggRankedPosition[])
+        .map((position) => ({
+          position: mapAssignedPosition(position.name),
+          popularity: getPositionPopularity(position),
+        }))
+        .filter((entry) => entry.position !== 'none')
+        .sort((left, right) => right.popularity - left.popularity)[0]
+
+      if (mostCommon) positionsByChampion.set(champion.id, mostCommon.position)
+    }
+
+    logger.info('[OPGG] 英雄常见分路表已缓存 → tier=%s, champions=%d', tier, positionsByChampion.size)
+    return positionsByChampion
+  }).catch((err) => {
+    commonPositionMapCache.delete(tier)
+    throw err
+  })
+
+  commonPositionMapCache.set(tier, promise)
+  return promise
+}
+
+async function resolveMostCommonPosition(championId: number, tier = getSelectedOpggTier()): Promise<OpggPosition | null> {
+  if (championId <= 0) return null
+
+  try {
+    const positionsByChampion = await ensureCommonPositionMap(tier)
+    return positionsByChampion.get(championId) ?? null
+  } catch (err) {
+    logger.warn('[OPGG] 获取英雄常见分路失败:', err)
+    return null
+  }
+}
+
+async function resolveInitialRecommendationPosition(options: {
+  championId: number
+  queueId: number
+  gameMode: string
+  assignedPosition: OpggPosition
+}): Promise<OpggPosition> {
+  const probeContext: RecommendationContext = {
+    championId: options.championId,
+    queueId: options.queueId,
+    gameVersion: '',
+    gameMode: options.gameMode,
+    position: options.assignedPosition,
+  }
+
+  if (resolveOpggMode(probeContext) !== 'ranked') return 'none'
+
+  if (isRankedQueue(options.queueId) && options.assignedPosition !== 'none') {
+    logger.info('[OPGG] 推荐分路使用排位分配位置 → %s', options.assignedPosition)
+    return options.assignedPosition
+  }
+
+  const mostCommonPosition = await resolveMostCommonPosition(options.championId)
+  if (mostCommonPosition) {
+    logger.info(
+      '[OPGG] 推荐分路使用英雄最常见位置 → championId=%d, position=%s, queueId=%d',
+      options.championId,
+      mostCommonPosition,
+      options.queueId,
+    )
+    return mostCommonPosition
+  }
+
+  if (options.assignedPosition !== 'none') return options.assignedPosition
+  logger.warn('[OPGG] 无法识别推荐分路，回退到中路 → championId=%d', options.championId)
+  return FALLBACK_OPGG_POSITION
 }
 
 async function resolveGameMode(queueId: number): Promise<string> {
@@ -209,7 +313,7 @@ function getAugmentGroups(data: OpggChampion): OpggAugmentGroup[] {
 function getRecommendationCacheKey(context: RecommendationContext): string {
   const mode = resolveOpggMode(context)
   const position = mode === 'ranked'
-    ? (context.position === 'none' ? 'mid' : context.position)
+    ? (context.position === 'none' ? FALLBACK_OPGG_POSITION : context.position)
     : 'none'
   const tier = getEffectiveOpggTier(context)
 
@@ -1048,17 +1152,29 @@ function scheduleRefreshWhenChampionLocked(delay = 250) {
 }
 
 async function refreshContext(session?: ChampSelectSession) {
+  const refreshToken = ++contextRefreshToken
   try {
     const currentSession = session ?? await lcu.getChampSelectSession()
     const localPlayer = getLocalPlayer(currentSession)
     const queueId = currentSession.queueId ?? 0
+    const championId = localPlayer?.championId ?? getLocalChampionId(currentSession)
+    const gameMode = await resolveGameMode(queueId)
+    const assignedPosition = mapAssignedPosition(localPlayer?.assignedPosition)
+    const position = await resolveInitialRecommendationPosition({
+      championId,
+      queueId,
+      gameMode,
+      assignedPosition,
+    })
+    if (refreshToken !== contextRefreshToken) return
+
     currentChampionLocked = isLocalChampionLocked(currentSession)
     currentContext = {
-      championId: localPlayer?.championId ?? getLocalChampionId(currentSession),
+      championId,
       queueId,
       gameVersion: currentContext.gameVersion,
-      gameMode: await resolveGameMode(queueId),
-      position: mapAssignedPosition(localPlayer?.assignedPosition),
+      gameMode,
+      position,
     }
 
     if (localPlayer) {
@@ -1103,7 +1219,9 @@ async function loadRecommendation(context: RecommendationContext): Promise<Build
   if (context.championId <= 0) return null
 
   const mode = resolveOpggMode(context)
-  const position = mode === 'ranked' ? (context.position === 'none' ? 'mid' : context.position) : 'none'
+  const position = mode === 'ranked'
+    ? (context.position === 'none' ? FALLBACK_OPGG_POSITION : context.position)
+    : 'none'
   const tier = getEffectiveOpggTier(context)
 
   if (isKiwiMode(context)) {
@@ -1477,6 +1595,18 @@ function renderInGameBuildRecommendationModal(
     renderInGameBuildRecommendationModal(context, nextEntry, nextToken)
     scheduleInGameModalRefresh(context, nextEntry, nextToken)
   }
+  const handlePositionChange = (position: OpggPosition) => {
+    const nextPosition = mapAssignedPosition(position)
+    if (nextPosition === 'none' || nextPosition === context.position) return
+
+    const nextContext = { ...context, position: nextPosition }
+    currentContext = { ...nextContext }
+    const nextEntry = ensureRecommendationPrefetch(nextContext)
+    if (nextEntry && currentChampionLocked) syncRecommendedItemSetWhenReady(nextEntry)
+    const nextToken = ++inGameModalRenderToken
+    renderInGameBuildRecommendationModal(nextContext, nextEntry, nextToken)
+    scheduleInGameModalRefresh(nextContext, nextEntry, nextToken)
+  }
 
   inGameModalRoot!.render(
     createElement(Modal, {
@@ -1493,6 +1623,7 @@ function renderInGameBuildRecommendationModal(
           isLoading,
           selectedTier: getSelectedOpggTier(),
           onTierChange: handleTierChange,
+          onPositionChange: handlePositionChange,
           onClose: close,
         }),
       ),
@@ -1536,12 +1667,22 @@ async function resolveInGameRecommendationContext(): Promise<RecommendationConte
     throw new Error('无法识别当前英雄')
   }
 
+  const queueId = session.gameData?.queue?.id ?? currentContext.queueId
+  const gameMode = session.gameData?.queue?.gameMode || session.map?.gameMode || currentContext.gameMode
+  const assignedPosition = mapAssignedPosition(player?.selectedPosition || player?.selectedRole || currentContext.position)
+  const position = await resolveInitialRecommendationPosition({
+    championId,
+    queueId,
+    gameMode,
+    assignedPosition,
+  })
+
   return {
     championId,
-    queueId: session.gameData?.queue?.id ?? currentContext.queueId,
+    queueId,
     gameVersion: currentContext.gameVersion || await lcu.getGameVersion().catch(() => ''),
-    gameMode: session.gameData?.queue?.gameMode || session.map?.gameMode || currentContext.gameMode,
-    position: mapAssignedPosition(player?.selectedPosition || player?.selectedRole || currentContext.position),
+    gameMode,
+    position,
   }
 }
 
@@ -1624,8 +1765,27 @@ async function openRecommendationPanel(anchor: HTMLElement, contextOverride?: Re
     if (cacheEntry) syncRecommendedItemSetWhenReady(cacheEntry)
     void openRecommendationPanel(anchor, context)
   }
+  const handlePositionChange = (position: OpggPosition) => {
+    const nextPosition = mapAssignedPosition(position)
+    if (nextPosition === 'none' || nextPosition === context.position) return
 
-  renderRecommendationPanel(reactRoot, context, recommendation, loadError, isLoading, getSelectedOpggTier(), handleTierChange)
+    const nextContext = { ...context, position: nextPosition }
+    currentContext = { ...nextContext }
+    const nextEntry = ensureRecommendationPrefetch(nextContext)
+    if (nextEntry && currentChampionLocked) syncRecommendedItemSetWhenReady(nextEntry)
+    void openRecommendationPanel(anchor, nextContext)
+  }
+
+  renderRecommendationPanel(
+    reactRoot,
+    context,
+    recommendation,
+    loadError,
+    isLoading,
+    getSelectedOpggTier(),
+    handleTierChange,
+    handlePositionChange,
+  )
   manager.appendChild(root)
 
   const rect = anchor.getBoundingClientRect()
@@ -1662,6 +1822,7 @@ async function openRecommendationPanel(anchor: HTMLElement, contextOverride?: Re
         false,
         getSelectedOpggTier(),
         handleTierChange,
+        handlePositionChange,
       )
 
       const updatedRect = anchor.getBoundingClientRect()
@@ -1698,6 +1859,7 @@ function renderRecommendationPanel(
   isLoading: boolean,
   selectedTier: OpggTier,
   onTierChange: (tier: OpggTier) => void,
+  onPositionChange: (position: OpggPosition) => void,
 ): void {
   flushSync(() => {
     root.render(createElement(OpggBuildRecommendationPanel, {
@@ -1707,6 +1869,7 @@ function renderRecommendationPanel(
       isLoading,
       selectedTier,
       onTierChange,
+      onPositionChange,
       onClose: closePanel,
     }))
   })
@@ -1821,6 +1984,7 @@ function unmountPanel() {
 }
 
 function unmount(resetContext = true) {
+  contextRefreshToken += 1
   stopChampionLockPolling()
   stopRunePagePolling()
   unmountPanel()

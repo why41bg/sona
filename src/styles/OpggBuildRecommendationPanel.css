@@ -122,10 +122,11 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
 }
 
-.sobp-tier-filter {
+.sobp-tier-filter,
+.sobp-position-filter {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -136,17 +137,27 @@
   font-weight: 800;
 }
 
+.sobp-position-filter {
+  min-width: 88px;
+}
+
 .sobp-tier-filter-label {
   flex: 0 0 auto;
   font-size: 15px;
 }
 
-.sobp-tier-filter .sona-select {
+.sobp-tier-filter .sona-select,
+.sobp-position-filter .sona-select {
   width: 135px;
   z-index: 20;
 }
 
-.sobp-tier-filter .sona-select-trigger {
+.sobp-position-filter .sona-select {
+  width: 90px;
+}
+
+.sobp-tier-filter .sona-select-trigger,
+.sobp-position-filter .sona-select-trigger {
   height: 30px;
   padding: 0 8px 0 10px;
   border-color: rgb(200 170 110 / 36%);
@@ -155,16 +166,19 @@
   font-weight: 700;
 }
 
-.sobp-tier-filter .sona-select-dropdown {
+.sobp-tier-filter .sona-select-dropdown,
+.sobp-position-filter .sona-select-dropdown {
   z-index: 30;
 }
 
-.sobp-tier-filter .sona-select-option {
+.sobp-tier-filter .sona-select-option,
+.sobp-position-filter .sona-select-option {
   padding: 8px 10px;
   font-size: 13px;
 }
 
-.sobp-tier-filter .sona-select-icon {
+.sobp-tier-filter .sona-select-icon,
+.sobp-position-filter .sona-select-icon {
   width: 16px;
   height: 16px;
 }

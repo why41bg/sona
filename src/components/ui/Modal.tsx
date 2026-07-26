@@ -233,6 +233,8 @@ export function Modal({
         </div>
       </div>
     </div>,
-    document.getElementById('sona-root') || document.body,
+    // 挂到 body，避免 #sona-root 的低层级 stacking context 被客户端透明层盖住，
+    // 出现弹窗可见但关闭按钮无法接收点击的情况。
+    document.body,
   )
 }

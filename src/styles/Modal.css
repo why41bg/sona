@@ -38,7 +38,7 @@
 .sona-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 0821;
+  z-index: 20000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -46,6 +46,11 @@
   backdrop-filter: blur(2px);
   animation: sona-modal-overlay-in 0.2s ease-out;
   pointer-events: auto;
+}
+
+.sona-modal-overlay,
+.sona-modal-overlay * {
+  box-sizing: border-box;
 }
 
 /* 遮罩层退场 */
@@ -109,7 +114,7 @@
   position: absolute;
   top: 10px;
   right: 10px;
-  z-index: 2;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;

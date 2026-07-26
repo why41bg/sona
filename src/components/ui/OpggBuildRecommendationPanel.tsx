@@ -49,6 +49,7 @@ const OPGG_TIER_OPTIONS: Array<{ value: OpggTier; label: string; icon?: string }
   ...option,
   icon: getOpggTierIcon(option.value),
 }))
+const OPGG_POSITION_VALUES: OpggPosition[] = ['top', 'jungle', 'mid', 'adc', 'support']
 
 function getOpggTierIcon(tier: OpggTier): string {
   if (tier === 'all' || tier === 'ibsg') return ''
@@ -108,6 +109,7 @@ export interface OpggBuildRecommendationPanelProps {
   isLoading: boolean
   selectedTier: OpggTier
   onTierChange: (tier: OpggTier) => void
+  onPositionChange: (position: OpggPosition) => void
   onClose: () => void
 }
 
@@ -118,6 +120,7 @@ export function OpggBuildRecommendationPanel({
   isLoading,
   selectedTier,
   onTierChange,
+  onPositionChange,
   onClose,
 }: OpggBuildRecommendationPanelProps) {
   const { t } = useI18n()
@@ -127,6 +130,7 @@ export function OpggBuildRecommendationPanel({
   const positionText = recommendation?.position ?? context.position
   const modeTags = [queueText, formatPositionText(positionText)].filter(Boolean).join(' · ')
   const showAugments = isKiwiMode(context) || recommendation?.mode === 'arena'
+  const showPositionFilter = supportsPositionFilter(context, recommendation)
 
   return (
     <div className="sobp">
@@ -146,6 +150,9 @@ export function OpggBuildRecommendationPanel({
           </div>
         </div>
         <div className="sobp-title-actions">
+          {showPositionFilter && (
+            <PositionFilterSelect value={context.position} onChange={onPositionChange} />
+          )}
           <TierFilterSelect value={selectedTier} onChange={onTierChange} />
           <TrendMeta meta={recommendation?.meta} />
           <SummaryCards values={recommendation?.summary ?? []} />
@@ -179,6 +186,24 @@ export function OpggBuildRecommendationPanel({
   )
 }
 
+function PositionFilterSelect({ value, onChange }: { value: OpggPosition; onChange: (position: OpggPosition) => void }) {
+  const { t } = useI18n()
+  const normalizedValue = OPGG_POSITION_VALUES.includes(value) ? value : 'mid'
+
+  return (
+    <div className="sobp-position-filter" title={t('opgg.position.select')}>
+      <SonaSelect
+        value={normalizedValue}
+        onChange={(nextValue) => onChange(nextValue as OpggPosition)}
+        options={OPGG_POSITION_VALUES.map((position) => ({
+          value: position,
+          label: formatPositionText(position),
+        }))}
+      />
+    </div>
+  )
+}
+
 function TierFilterSelect({ value, onChange }: { value: OpggTier; onChange: (tier: OpggTier) => void }) {
   return (
     <div className="sobp-tier-filter">
@@ -193,6 +218,13 @@ function TierFilterSelect({ value, onChange }: { value: OpggTier; onChange: (tie
 
 function isKiwiMode(context: RecommendationContext): boolean {
   return context.gameMode.toLowerCase() === 'kiwi'
+}
+
+function supportsPositionFilter(context: RecommendationContext, recommendation: BuildRecommendation | null): boolean {
+  if (recommendation) return recommendation.mode === 'ranked'
+
+  const mode = context.gameMode.toLowerCase()
+  return !['aram', 'kiwi', 'cherry', 'arena', 'nexusblitz', 'nexus_blitz', 'urf', 'arurf'].includes(mode)
 }
 
 function formatPositionText(position: OpggPosition): string {

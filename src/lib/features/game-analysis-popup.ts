@@ -11,8 +11,18 @@ import { GameAnalysisModal } from '@/components/ui/GameAnalysisModal'
 /** GameAnalysisModal 的独立 React root */
 let gameAnalysisRoot: Root | null = null
 let gameAnalysisContainer: HTMLDivElement | null = null
+let gameAnalysisCloseTimer: number | null = null
+let popupRequestToken = 0
+let autoPopupAttempted = false
+
+const MODAL_CLOSE_ANIMATION_MS = 240
 
 function showGameAnalysisModal() {
+  if (gameAnalysisCloseTimer != null) {
+    window.clearTimeout(gameAnalysisCloseTimer)
+    gameAnalysisCloseTimer = null
+  }
+
   if (!gameAnalysisContainer) {
     gameAnalysisContainer = document.createElement('div')
     gameAnalysisContainer.id = 'sona-game-analysis-root'
@@ -21,9 +31,17 @@ function showGameAnalysisModal() {
   }
 
   const close = () => {
-    gameAnalysisRoot?.render(
+    const rootAtClose = gameAnalysisRoot
+    rootAtClose?.render(
       createElement(GameAnalysisModal, { open: false, onClose: close }),
     )
+    logger.info('[GameAnalysis] 战力分析弹窗已关闭')
+
+    if (gameAnalysisCloseTimer != null) window.clearTimeout(gameAnalysisCloseTimer)
+    gameAnalysisCloseTimer = window.setTimeout(() => {
+      gameAnalysisCloseTimer = null
+      if (gameAnalysisRoot === rootAtClose) cleanupGameAnalysisModal()
+    }, MODAL_CLOSE_ANIMATION_MS)
   }
 
   gameAnalysisRoot!.render(
@@ -33,6 +51,10 @@ function showGameAnalysisModal() {
 }
 
 function cleanupGameAnalysisModal() {
+  if (gameAnalysisCloseTimer != null) {
+    window.clearTimeout(gameAnalysisCloseTimer)
+    gameAnalysisCloseTimer = null
+  }
   if (gameAnalysisRoot) {
     gameAnalysisRoot.unmount()
     gameAnalysisRoot = null
@@ -92,6 +114,7 @@ export function updateGameAnalysisPopup(enabled: boolean) {
     gameAnalysisPopupUnsub = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, (event: LCUEventMessage) => {
       const phase = event.data as GameflowPhase
       if (phase === 'InProgress') {
+        const requestToken = ++popupRequestToken
         // 注册内嵌按钮注入
         if (!gameAnalysisBtnRegistered) {
           injector.register(tryInjectGameAnalysisButton)
@@ -100,20 +123,26 @@ export function updateGameAnalysisPopup(enabled: boolean) {
         // 查询当前 gameId 避免重连时重复弹窗
         lcu.getGameflowSession()
           .then((session) => {
+            if (requestToken !== popupRequestToken || !gameAnalysisPopupUnsub) return
             const gid = session.gameData?.gameId ?? 0
-            if (gid > 0 && gid !== lastPopupGameId) {
+            if (!autoPopupAttempted && gid > 0 && gid !== lastPopupGameId) {
+              autoPopupAttempted = true
               lastPopupGameId = gid
               showGameAnalysisModal()
             }
           })
           .catch(() => {
+            if (requestToken !== popupRequestToken || !gameAnalysisPopupUnsub || autoPopupAttempted) return
             // session 查询失败也尝试弹窗（可能是自定义等特殊情况）
+            autoPopupAttempted = true
             showGameAnalysisModal()
           })
-      } else if (phase === 'WaitingForStats' || phase === 'PreEndOfGame' || phase === 'EndOfGame') {
-        // 游戏已结束（WaitingForStats / PreEndOfGame / EndOfGame / None / Lobby 等）
-        // 重置状态并关闭弹窗
+      } else {
+        // 任何非 InProgress 阶段都撤销待处理请求并清理弹窗，避免在 Lobby / None
+        // 等阶段残留，或被较晚返回的异步请求重新打开。
+        popupRequestToken += 1
         lastPopupGameId = 0
+        autoPopupAttempted = false
         // 取消按钮注入
         if (gameAnalysisBtnRegistered) {
           injector.unregister(tryInjectGameAnalysisButton)
@@ -125,9 +154,11 @@ export function updateGameAnalysisPopup(enabled: boolean) {
     })
     logger.info('Game analysis popup enabled ✓')
   } else if (!enabled && gameAnalysisPopupUnsub) {
+    popupRequestToken += 1
     gameAnalysisPopupUnsub()
     gameAnalysisPopupUnsub = null
     lastPopupGameId = 0
+    autoPopupAttempted = false
     if (gameAnalysisBtnRegistered) {
       injector.unregister(tryInjectGameAnalysisButton)
       gameAnalysisBtnRegistered = false

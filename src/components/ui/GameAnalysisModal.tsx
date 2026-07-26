@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createElement } from 'react'
+import { useState, useEffect, useCallback, useRef, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Modal } from '@/components/ui/Modal'
 import { MatchHistoryModal } from '@/components/ui/MatchHistoryModal'
@@ -129,8 +129,10 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [premadeGroups, setPremadeGroups] = useState<Map<string, string>>(new Map())
+  const loadTokenRef = useRef(0)
 
   const loadAnalysis = useCallback(async () => {
+    const loadToken = ++loadTokenRef.current
     setLoading(true)
     setError('')
     setBlueTeam([])
@@ -140,6 +142,7 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
 
     // Mock 模式：直接使用传入的 mock 数据
     if (mockData) {
+      if (loadToken !== loadTokenRef.current) return
       setBlueTeam(sortTeamByPosition(mockData.blueTeam))
       setRedTeam(sortTeamByPosition(mockData.redTeam))
       setGameInfo(mockData.gameInfo)
@@ -149,6 +152,7 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
 
     try {
       const session = await lcu.getGameflowSession()
+      if (loadToken !== loadTokenRef.current) return
       const teamOne = session.gameData.teamOne ?? []
       const teamTwo = session.gameData.teamTwo ?? []
       const selections = session.gameData.playerChampionSelections ?? []
@@ -168,6 +172,7 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
 
       // 判断自己所在队伍：优先从 team 匹配，否则从 selections 索引判断
       const localPuuid = (await lcu.getSummonerInfo()).puuid
+      if (loadToken !== loadTokenRef.current) return
       const isInTeamOne = teamOne.some(p => p.puuid === localPuuid)
         || selTeamOne.some(s => s.puuid === localPuuid)
 
@@ -365,20 +370,25 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
         analyzeTeam(resolvedTeamOne),
         analyzeTeam(resolvedTeamTwo),
       ])
+      if (loadToken !== loadTokenRef.current) return
 
       setBlueTeam(sortTeamByPosition(isInTeamOne ? one : two))
       setRedTeam(sortTeamByPosition(isInTeamOne ? two : one))
     } catch (err) {
+      if (loadToken !== loadTokenRef.current) return
       setError(t('gameAnalysis.empty'))
       console.error('[GameAnalysis] 加载失败:', err)
     } finally {
-      setLoading(false)
+      if (loadToken === loadTokenRef.current) setLoading(false)
     }
   }, [mockData, t])
 
   // 打开时加载
   useEffect(() => {
-    if (open) loadAnalysis()
+    if (open) void loadAnalysis()
+    return () => {
+      loadTokenRef.current += 1
+    }
   }, [open, loadAnalysis])
 
   // 计算队伍平均胜率
