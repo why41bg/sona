@@ -305,7 +305,7 @@ export function getChampIcon(id: number): string {
 
 /** 获取装备图标路径 */
 export function getItemIcon(id: number): string {
-  return itemMap.get(id) ?? ''
+  return itemMap.get(id) ?? (id > 0 ? `/lol-game-data/assets/v1/item-icons/${id}.png` : '')
 }
 
 /** 获取装备名称 */
@@ -322,7 +322,7 @@ export function getItemPrice(id: number): number {
 export function getItemInfo(id: number): { name: string; iconPath: string; description: string; price: number } {
   return {
     name: itemNameMap.get(id) ?? String(id),
-    iconPath: itemMap.get(id) ?? '',
+    iconPath: getItemIcon(id),
     description: itemDescriptionMap.get(id) ?? '',
     price: itemPriceMap.get(id) ?? 0,
   }

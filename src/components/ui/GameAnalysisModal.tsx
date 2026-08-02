@@ -534,7 +534,7 @@ function PlayerRow({ player, isRed, queueId }: { player: PlayerAnalysis; isRed: 
             )}
             {premadeGroup && (
               <span className="sga-premade-badge" style={{ background: premadeColor }}>
-                {premadeGroup}
+                {t('gameAnalysis.premadeTeam', { group: premadeGroup })}
               </span>
             )}
           </div>

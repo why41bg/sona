@@ -458,11 +458,11 @@
 }
 
 .sga-recent-win {
-  background: rgba(91, 189, 114, 0.15);
+  background: rgba(91, 189, 114, 0.3);
 }
 
 .sga-recent-loss {
-  background: rgba(232, 64, 87, 0.15);
+  background: rgba(232, 64, 87, 0.3);
 }
 
 .sga-recent-champ {

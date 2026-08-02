@@ -19,10 +19,22 @@ import type { Availability, ChatMe } from '@/lib/lcu'
 import { sleep } from '@/lib/utils'
 import { getPuuid } from '@/lib/assets'
 import { getUpdateState, onUpdateStateChange } from '@/lib/update-checker'
-import { stripAvatarStatusPayload } from '@/lib/features/beautify-client/avatar-status-sync'
+import {
+  decodeSonaStatusPayload,
+  embedSonaStatusPayload,
+  stripAvatarStatusPayload,
+} from '@/lib/features/beautify-client/avatar-status-sync'
 
 /** 通用标记：标识已被 Sona 接管的 DOM 元素，防止重复绑定 */
 const HIJACKED_ATTR = 'data-sona-hijacked'
+
+function replaceVisibleStatusPreservingSonaPayload(
+  currentStatusMessage: string | null | undefined,
+  visibleStatusMessage: string,
+): string {
+  const payload = decodeSonaStatusPayload(currentStatusMessage)
+  return payload ? embedSonaStatusPayload(visibleStatusMessage, payload) : visibleStatusMessage
+}
 
 // ==================== Sona 入口按钮 ====================
 
@@ -181,7 +193,7 @@ async function restoreAvailabilityAndStatus() {
     const clientStatus = hasContent(me.statusMessage) ? stripAvatarStatusPayload(me.statusMessage as string) : ''
     if (clientStatus === '' && hasContent(savedStatus)) {
       try {
-        await lcu.setStatusMessage(savedStatus)
+        await lcu.setStatusMessage(replaceVisibleStatusPreservingSonaPayload(me.statusMessage, savedStatus))
         logger.info('[Availability] 已写入 statusMessage: %s', savedStatus)
       } catch (err) {
         logger.warn('[Availability] statusMessage 写入失败（稍后会再校验一次）:', err)
@@ -251,7 +263,7 @@ async function verifyAvailabilitySnapshot(label: string) {
     // 校验 statusMessage
     if (hasContent(savedStatus) && clientStatus !== savedStatus) {
       logger.warn('[Availability] 延迟校验(%s)发现 statusMessage 被客户端回退（"%s" → "%s"），再次写入', label, savedStatus, clientStatus)
-      await lcu.setStatusMessage(savedStatus).catch((err) => {
+      await lcu.setStatusMessage(replaceVisibleStatusPreservingSonaPayload(me.statusMessage, savedStatus)).catch((err) => {
         logger.warn('[Availability] 延迟校验(%s)写 statusMessage 失败:', label, err)
       })
     }

@@ -13,6 +13,10 @@ import { openOpggBuildRecommendationDebugPanel } from '@/lib/features/opgg-build
 import { opggApi } from '@/lib/opgg-api'
 import { getPluginAssetsFolderPath, resolvePluginAssetUrl } from '@/lib/plugin-resolver'
 import { uploadImageToHostingServiceForDebug } from '@/lib/image-hosting-service'
+import {
+  decodeSonaStatusPayload,
+  stripAvatarStatusPayload,
+} from '@/lib/features/beautify-client/avatar-status-sync'
 import { logger } from '@/index'
 import { useI18n } from '@/i18n'
 import '@/styles/SettingsPage.css'
@@ -564,6 +568,61 @@ export function DebugPage() {
     }
   }
 
+  const inspectOnlineFriendStatusMessages = async () => {
+    const [me, friends] = await Promise.all([
+      lcu.getChatMe(),
+      lcu.getFriends(),
+    ])
+
+    const inspectStatusMessage = (statusMessage: string | null | undefined) => {
+      const source = statusMessage ?? ''
+      const parsedPayload = decodeSonaStatusPayload(source)
+
+      return {
+        statusMessage: source,
+        statusMessageLength: source.length,
+        visibleStatusMessage: stripAvatarStatusPayload(source),
+        parsed: parsedPayload != null,
+        parsedPayload,
+      }
+    }
+
+    const onlineFriends = friends
+      .filter((friend) => friend.availability !== 'offline')
+      .map((friend) => ({
+        gameName: friend.gameName,
+        gameTag: friend.gameTag,
+        riotId: friend.gameTag ? `${friend.gameName}#${friend.gameTag}` : friend.gameName,
+        puuid: friend.puuid,
+        friendId: friend.id,
+        summonerId: friend.summonerId,
+        availability: friend.availability,
+        product: friend.product,
+        ...inspectStatusMessage(friend.statusMessage),
+      }))
+
+    const result = {
+      summary: {
+        totalFriends: friends.length,
+        nonOfflineFriends: onlineFriends.length,
+        parsedFriends: onlineFriends.filter((friend) => friend.parsed).length,
+      },
+      self: {
+        gameName: me.gameName,
+        gameTag: me.gameTag,
+        riotId: me.gameTag ? `${me.gameName}#${me.gameTag}` : me.gameName,
+        puuid: me.puuid,
+        summonerId: me.summonerId,
+        availability: me.availability,
+        ...inspectStatusMessage(me.statusMessage),
+      },
+      friends: onlineFriends,
+    }
+
+    console.info('[Sona][StatusMessageDebug] 自己及非离线好友签名解析结果\n%s', JSON.stringify(result, null, 2))
+    return result
+  }
+
   const getOpggDebugChampionId = async () => {
     if (selectedChampId > 0) return selectedChampId
     try {
@@ -668,6 +727,12 @@ export function DebugPage() {
           </SonaButton>
           <SonaButton onClick={() => runAndLog('获取在线状态', () => lcu.getChatMe())}>
             {t('debug.action.chatMe')}
+          </SonaButton>
+          <SonaButton
+            variant="primary"
+            onClick={() => runAndLog('解析自己及非离线好友签名', inspectOnlineFriendStatusMessages)}
+          >
+            检查签名 JSON
           </SonaButton>
           <SonaButton onClick={() => runAndLog('获取游戏流程', () => lcu.getGameflowPhase())}>
             {t('debug.action.gameflow')}

@@ -2,9 +2,14 @@ import { logger } from '@/index'
 import { store } from '@/lib/store'
 import { lcu, LcuEventUri } from '@/lib/lcu'
 import type { ChampSelectSession, GameflowPhase, LCUEventMessage } from '@/lib/lcu'
+import type { ChampSelectAction } from '@/types/lcu'
 import { sleep } from '@/lib/utils'
 import { getChampionById } from '@/lib/assets'
 import { translate } from '@/i18n'
+
+const AUTO_BAN_MAX_ATTEMPTS = 600
+const AUTO_BAN_POLL_INTERVAL_MS = 500
+const AUTO_BAN_CONFIRM_DELAYS = [80, 180]
 
 async function notifyAutoBanSuccess(championId: number) {
   const champInfo = getChampionById(championId)
@@ -56,10 +61,13 @@ async function resolveTargetChampionId(session: ChampSelectSession): Promise<num
   const championIds = getConfiguredChampionIds()
   if (championIds.length === 0) return null
 
-  const [bannableIds, disabledIds] = await Promise.all([
+  const [rawBannableIds, disabledIds] = await Promise.all([
     getOptionalIdSet(() => lcu.getBannableChampionIds()),
     getOptionalIdSet(() => lcu.getDisabledChampionIds()),
   ])
+  // Ban action 刚进入 isInProgress 时，这个接口偶尔会短暂返回空数组；空集合
+  // 不应把全部候选都误判为不可 Ban，后续提交仍由 action API 做最终校验。
+  const bannableIds = rawBannableIds && rawBannableIds.size > 0 ? rawBannableIds : null
   const unavailableIds = collectUnavailableBanIds(session)
 
   return championIds.find((id) => {
@@ -70,49 +78,108 @@ async function resolveTargetChampionId(session: ChampSelectSession): Promise<num
   }) ?? null
 }
 
-async function tryAutoBanChampion() {
+function findActionById(session: ChampSelectSession, actionId: number): ChampSelectAction | undefined {
+  return session.actions.flat(2).find((action) => action.id === actionId)
+}
+
+async function confirmBanCompleted(actionId: number, championId: number): Promise<boolean | null> {
+  let readSucceeded = false
+
+  for (const delay of AUTO_BAN_CONFIRM_DELAYS) {
+    await sleep(delay)
+    try {
+      const session = await lcu.getChampSelectSession()
+      readSucceeded = true
+      const action = findActionById(session, actionId)
+      const appearsInBanList = session.bans.myTeamBans.includes(championId)
+        || session.bans.theirTeamBans.includes(championId)
+      if (appearsInBanList || (action?.completed && action.championId === championId)) return true
+    } catch {
+      // 会话刚结束或客户端短暂切换时保留 API 成功结果，不把回读失败当作 Ban 失败。
+    }
+  }
+
+  return readSucceeded ? false : null
+}
+
+async function submitBanAction(action: ChampSelectAction, championId: number): Promise<boolean> {
+  const actionUrl = `/lol-champ-select/v1/session/actions/${action.id}`
+
+  try {
+    const patchRes = await fetch(actionUrl, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        championId,
+        completed: true,
+        type: 'ban',
+      }),
+    })
+
+    if (patchRes.ok) {
+      const confirmed = await confirmBanCompleted(action.id, championId)
+      if (confirmed !== false) return true
+      logger.warn('[AutoBan] 单步 PATCH 返回成功但会话未确认完成，切换两步式兜底')
+    } else {
+      logger.warn('[AutoBan] 单步 PATCH 失败 (status=%d)，切换两步式兜底', patchRes.status)
+    }
+  } catch (error) {
+    logger.warn('[AutoBan] 单步 PATCH 请求异常，切换两步式兜底:', error)
+  }
+
+  try {
+    await lcu.lockChampion(championId, action.id)
+    const confirmed = await confirmBanCompleted(action.id, championId)
+    if (confirmed === false) {
+      logger.warn('[AutoBan] 两步式提交完成，但会话仍未确认 Ban 结果')
+      return false
+    }
+    return true
+  } catch (error) {
+    logger.warn('[AutoBan] 两步式提交失败:', error)
+    return false
+  }
+}
+
+let autoBanRunToken = 0
+let autoBanRunPromise: Promise<void> | null = null
+
+async function tryAutoBanChampion(runToken: number, reason: string) {
   if (getConfiguredChampionIds().length === 0) {
     logger.warn('[AutoBan] 未设置目标英雄队列')
     return
   }
 
-  // Ban 阶段通常很早出现，保留 5 分钟轮询以兼容排位 BP 的完整流程。
-  for (let attempt = 0; attempt < 300; attempt++) {
+  logger.info('[AutoBan] 开始监听本局 Ban action：%s', reason)
+
+  // 选人事件负责及时唤醒，轮询负责兜住丢失的 WS 更新。
+  for (let attempt = 0; attempt < AUTO_BAN_MAX_ATTEMPTS; attempt++) {
+    if (runToken !== autoBanRunToken || !store.get('autoBanChampion')) return
+
     try {
       const session = await lcu.getChampSelectSession()
       const allActions = session.actions.flat(2)
       if (allActions.length === 0) {
-        await sleep(1000)
+        await sleep(AUTO_BAN_POLL_INTERVAL_MS)
         continue
       }
 
-      const myBanAction = allActions.find(
-        (action) => action.actorCellId === session.localPlayerCellId && action.type === 'ban' && !action.completed,
+      const myBanActions = allActions.filter(
+        (action) => action.actorCellId === session.localPlayerCellId && action.type === 'ban',
       )
+      const myBanAction = myBanActions.find((action) => !action.completed)
 
       if (!myBanAction) {
-        if (allActions.every((action) => action.type !== 'ban' || action.actorCellId !== session.localPlayerCellId)) {
+        if (session.bans.numBans === 0 || myBanActions.length === 0) {
           logger.info('[AutoBan] 当前模式无需禁用英雄，跳过')
           return
         }
-
-        await sleep(1000)
-        continue
-      }
-
-      const selfSummoner = await lcu.getChampSelectSummoner(session.localPlayerCellId).catch(() => null)
-      if (!selfSummoner) {
-        await sleep(500)
-        continue
-      }
-
-      if (!selfSummoner.isActingNow) {
-        await sleep(500)
-        continue
+        logger.info('[AutoBan] 本局 Ban action 已完成，无需重复处理')
+        return
       }
 
       if (!myBanAction.isInProgress) {
-        await sleep(500)
+        await sleep(AUTO_BAN_POLL_INTERVAL_MS)
         continue
       }
 
@@ -122,30 +189,27 @@ async function tryAutoBanChampion() {
         return
       }
 
-      const actionUrl = `/lol-champ-select/v1/session/actions/${myBanAction.id}`
       logger.info('[AutoBan] 轮到禁用英雄，目标英雄 ID: %d (actionId: %d)', championId, myBanAction.id)
 
-      const patchRes = await fetch(actionUrl, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          championId,
-          completed: true,
-          type: 'ban',
-        }),
-      })
-
-      if (patchRes.ok) {
+      if (await submitBanAction(myBanAction, championId)) {
         logger.info('[AutoBan] 自动 Ban 成功 ✓')
-        notifyAutoBanSuccess(championId)
+        void notifyAutoBanSuccess(championId)
+        return
       } else {
-        logger.warn('[AutoBan] 自动 Ban 失败 (status=%d)，可能英雄不可 Ban 或已被处理', patchRes.status)
+        logger.warn('[AutoBan] 本次提交未完成，将等待下一次会话更新重试')
       }
 
-      return
-    } catch {
-      logger.error('[AutoBan] 轮询中断 (可能有人秒退了房间)')
-      return
+      await sleep(AUTO_BAN_POLL_INTERVAL_MS)
+    } catch (error) {
+      const phase = await lcu.getGameflowPhase().catch(() => null)
+      if (phase !== 'ChampSelect') {
+        logger.info('[AutoBan] 已离开英雄选择，停止本局自动 Ban')
+        return
+      }
+      if (attempt === 0 || attempt % 10 === 0) {
+        logger.warn('[AutoBan] 会话读取暂时失败，继续重试:', error)
+      }
+      await sleep(AUTO_BAN_POLL_INTERVAL_MS)
     }
   }
 
@@ -153,19 +217,59 @@ async function tryAutoBanChampion() {
 }
 
 let autoBanChampionUnsub: (() => void) | null = null
+let autoBanSessionUnsub: (() => void) | null = null
+
+function stopAutoBanRun() {
+  autoBanRunToken++
+  autoBanRunPromise = null
+}
+
+function startAutoBanRun(reason: string) {
+  if (!store.get('autoBanChampion') || autoBanRunPromise) return
+
+  const runToken = ++autoBanRunToken
+  const task = tryAutoBanChampion(runToken, reason)
+  autoBanRunPromise = task
+  void task.finally(() => {
+    if (autoBanRunPromise === task) autoBanRunPromise = null
+  })
+}
+
+function probeCurrentAutoBanPhase(reason: string) {
+  void lcu.getGameflowPhase()
+    .then((phase) => {
+      if (phase === 'ChampSelect') startAutoBanRun(reason)
+    })
+    .catch((error) => logger.debug('[AutoBan] 当前阶段探测暂未就绪:', error))
+}
 
 export function updateAutoBanChampion(enabled: boolean) {
   if (enabled && !autoBanChampionUnsub) {
     autoBanChampionUnsub = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, (event: LCUEventMessage) => {
       const phase = event.data as GameflowPhase
       if (phase === 'ChampSelect') {
-        tryAutoBanChampion()
+        startAutoBanRun('gameflow-phase')
+      } else {
+        stopAutoBanRun()
       }
     })
+    autoBanSessionUnsub = lcu.observe(LcuEventUri.CHAMP_SELECT, (event: LCUEventMessage) => {
+      if (event.eventType === 'Delete') {
+        stopAutoBanRun()
+        return
+      }
+      startAutoBanRun('champ-select-session')
+    })
+    probeCurrentAutoBanPhase('enable-probe')
     logger.info('Auto ban champion enabled ✓')
   } else if (!enabled && autoBanChampionUnsub) {
     autoBanChampionUnsub()
     autoBanChampionUnsub = null
+    autoBanSessionUnsub?.()
+    autoBanSessionUnsub = null
+    stopAutoBanRun()
     logger.info('Auto ban champion disabled')
+  } else if (enabled) {
+    probeCurrentAutoBanPhase('config-refresh')
   }
 }

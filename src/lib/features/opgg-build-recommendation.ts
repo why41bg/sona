@@ -1285,6 +1285,20 @@ async function loadAramggKiwiRecommendation(
 
   const normal = opggChampion && isNormalChampion(opggChampion) ? opggChampion : null
   const data = opggChampion?.data
+  const aramggCoreItems = mapAramggCoreItemBuilds(aramgg.coreItemBuilds)
+  const aramggLastItems = mapAramggItems(aramgg.items)
+
+  // ARAM.GG 偶尔会在页面结构升级后暂时解析不到装备数据。海克斯模式仍然
+  // 需要优先使用它的专属数据，但每个空分段都必须退回 OP.GG，避免生成的
+  // 本地配装只剩鞋子。出门装则始终由 OP.GG 提供，因为 ARAM.GG 没有该分段。
+  if (aramggCoreItems.length === 0 || aramggLastItems.length === 0) {
+    logger.warn(
+      '[BuildRecommendation] ARAM.GG 装备分段为空，回退 OP.GG：champion=%d core=%d last=%d',
+      context.championId,
+      aramggCoreItems.length,
+      aramggLastItems.length,
+    )
+  }
 
   return {
     mode,
@@ -1293,11 +1307,11 @@ async function loadAramggKiwiRecommendation(
     position,
     summary: getAramggSummaryLines(aramgg),
     summonerSpells: normal?.data.summoner_spells ?? [],
-    starterItems: [],
+    starterItems: data?.starter_items ?? [],
     boots: data?.boots ?? [],
-    coreItems: mapAramggCoreItemBuilds(aramgg.coreItemBuilds),
+    coreItems: aramggCoreItems.length > 0 ? aramggCoreItems : (data?.core_items ?? []),
     prismItems: [],
-    lastItems: mapAramggItems(aramgg.items),
+    lastItems: aramggLastItems.length > 0 ? aramggLastItems : (data?.last_items ?? []),
     runePages: [],
     matchups: [],
     augments: mapAramggAugments(aramgg.augments, mayhemAugments),

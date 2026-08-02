@@ -8,6 +8,7 @@ import { uploadImageToHostingService } from '@/lib/image-hosting-service'
 import {
   clearAvatarUrlFromStatusMessage,
   decodeAvatarStatusPayload,
+  hasCurrentAvatarStatusPayload,
   stripAvatarStatusPayload,
   writeAvatarUrlToStatusMessage,
 } from '@/lib/features/beautify-client/avatar-status-sync'
@@ -30,10 +31,13 @@ const MEMBER_TYPE_ATTR = 'member-type'
 const PUUID_ATTR = 'puuid'
 const DATA_PUUID_ATTR = 'data-puuid'
 const VOICE_PUUID_ATTR = 'voice-puuid'
-const SOCIAL_MEMBER_SELECTOR = '[class*="lol-social-roster-member"]'
+const SOCIAL_MEMBER_SELECTOR = 'lol-social-roster-member, [class*="lol-social-roster-member"]'
 const SOCIAL_MEMBER_NAME_SELECTOR = '.member-name'
+const SOCIAL_MEMBER_FRIEND_ID_ATTRS = ['data-friend-id', 'friend-id', 'data-id', 'id']
 const FRIENDS_URI = '/lol-chat/v1/friends'
 const LEGACY_IMAGE_HOSTS = new Set(['i.ibb.co', 'ibb.co'])
+const REMOTE_AVATAR_LOAD_RETRY_DELAYS = [0, 350, 900]
+const REMOTE_AVATAR_LOAD_TIMEOUT = 10_000
 
 let customAvatarRegistered = false
 let customAvatarObserver: MutationObserver | null = null
@@ -47,6 +51,7 @@ let ownStatusUnsub: (() => void) | null = null
 let friendAvatarRefreshTimer: number | null = null
 let ownStatusRestorePromise: Promise<void> | null = null
 let legacyAvatarMigrationPromise: Promise<void> | null = null
+let lastFriendAvatarScanSignature = ''
 const friendImageObservers = new Map<HTMLImageElement, MutationObserver>()
 const tftIconObservers = new Map<HTMLElement, MutationObserver>()
 const regaliaElementObservers = new Map<Element, MutationObserver>()
@@ -58,6 +63,7 @@ const patchedFriendImages = new Set<HTMLImageElement>()
 const patchedTftIcons = new Set<HTMLElement>()
 const patchedRegaliaElements = new Set<Element>()
 const originalFriendImageSrc = new WeakMap<HTMLImageElement, string | null>()
+const originalFriendImageReferrerPolicy = new WeakMap<HTMLImageElement, string | null>()
 const originalTftIconBackgroundImage = new WeakMap<HTMLElement, string | null>()
 const originalRegaliaProfileIconUrl = new WeakMap<Element, string | null>()
 const originalRegaliaSummonerIconBackgroundImage = new WeakMap<Element, string | null>()
@@ -67,10 +73,55 @@ const remoteAvatarCache = new Map<string, string | null>(
   Object.entries(store.get('customAvatarRemoteCache')),
 )
 const friendPuuidByName = new Map<string, string>()
+const friendPuuidByChatId = new Map<string, string>()
 const knownFriendPuuids = new Set<string>()
 
 function getAssetUrl(assetPath: string): string {
   return resolvePluginAssetUrl(assetPath)
+}
+
+function loadRemoteAvatarOnce(avatarUrl: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    let settled = false
+    const timeout = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      image.onload = null
+      image.onerror = null
+      reject(new Error('远程头像加载超时'))
+    }, REMOTE_AVATAR_LOAD_TIMEOUT)
+
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      image.onload = null
+      image.onerror = null
+      if (error) reject(error)
+      else resolve()
+    }
+
+    image.referrerPolicy = 'no-referrer'
+    image.onload = () => finish()
+    image.onerror = () => finish(new Error('远程头像直链加载失败'))
+    image.src = avatarUrl
+  })
+}
+
+async function assertRemoteAvatarLoadable(avatarUrl: string): Promise<void> {
+  let lastError: unknown = null
+  for (const delay of REMOTE_AVATAR_LOAD_RETRY_DELAYS) {
+    if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
+    try {
+      await loadRemoteAvatarOnce(avatarUrl)
+      return
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('远程头像直链加载失败')
 }
 
 function getCurrentAvatarUrl(): string {
@@ -137,8 +188,13 @@ function indexFriendPuuid(friend: ChatFriend) {
   const puuid = normalizePuuid(friend.puuid)
   if (!puuid) return
 
+  const chatId = normalizeFriendNameKey(friend.id)
+  if (chatId) friendPuuidByChatId.set(chatId, puuid)
+
   const keys = [
     friend.gameName,
+    friend.name,
+    friend.gameName && friend.gameTag ? `${friend.gameName}#${friend.gameTag}` : '',
   ]
 
   keys.forEach((key) => {
@@ -152,6 +208,20 @@ function getFriendImagePuuid(image: HTMLImageElement): string {
   if (attrPuuid) return attrPuuid
 
   const member = image.closest(SOCIAL_MEMBER_SELECTOR)
+  if (!member) return ''
+  for (const attributeName of SOCIAL_MEMBER_FRIEND_ID_ATTRS) {
+    const friendId = normalizeFriendNameKey(member.getAttribute(attributeName))
+    if (!friendId) continue
+
+    const mapped = friendPuuidByChatId.get(friendId)
+    if (mapped) return mapped
+
+    if (friendId.endsWith('@pvp.net')) {
+      const puuidFromChatId = normalizePuuid(friendId.slice(0, -'@pvp.net'.length))
+      if (puuidFromChatId) return puuidFromChatId
+    }
+  }
+
   const name = normalizeFriendNameKey(member?.querySelector(SOCIAL_MEMBER_NAME_SELECTOR)?.textContent)
   if (!name) return ''
 
@@ -194,10 +264,14 @@ function queryFriendRosterMembers(): Element[] {
 function queryFriendAvatarCandidates(): FriendAvatarCandidate[] {
   return queryFriendRosterMembers().map((member) => {
     const memberName = member.querySelector(SOCIAL_MEMBER_NAME_SELECTOR)?.textContent?.trim() ?? ''
-    const puuid = friendPuuidByName.get(normalizeFriendNameKey(memberName)) ?? ''
     const image = member.querySelector<HTMLImageElement>(FRIEND_MEMBER_AVATAR_SELECTOR)
+      || member.querySelector<HTMLImageElement>('.lol-social-avatar.member-icon img, .lol-social-avatar img.icon-image')
 
     if (!image) return null
+    const puuid = getPuuidFromElement(member)
+      || getFriendImagePuuid(image)
+      || friendPuuidByName.get(normalizeFriendNameKey(memberName))
+      || ''
     return { image, memberName, puuid }
   }).filter((candidate): candidate is FriendAvatarCandidate => Boolean(candidate))
 }
@@ -215,12 +289,13 @@ function persistRemoteAvatarCacheEntry(puuid: string, avatarUrl: string | null) 
 function updateFriendPuuidIndexes(friends: ChatFriend[]): Set<string> {
   const nextPuuids = new Set<string>()
   friendPuuidByName.clear()
+  friendPuuidByChatId.clear()
 
   friends.forEach((friend) => {
     const puuid = normalizePuuid(friend.puuid)
     if (puuid) nextPuuids.add(puuid)
     indexFriendPuuid(friend)
-    updateRemoteAvatarFromFriendStatus(friend)
+    updateRemoteAvatarFromFriendStatus(friend, true)
   })
 
   friendPuuidMapUpdatedAt = Date.now()
@@ -247,13 +322,15 @@ function isFriendOffline(friend: ChatFriend): boolean {
   return friend.availability === 'offline'
 }
 
-function updateRemoteAvatarFromFriendStatus(friend: ChatFriend): boolean {
+function updateRemoteAvatarFromFriendStatus(friend: ChatFriend, allowClear: boolean): boolean {
   const puuid = normalizePuuid(friend.puuid)
   if (!puuid) return false
   if (!hasFriendStatusMessage(friend)) return false
 
   const avatarUrl = decodeAvatarStatusPayload(getFriendStatusMessage(friend))
   if (!avatarUrl) {
+    // WS presence 事件可能只携带局部字段或瞬时空签名；只允许完整好友列表刷新清理缓存。
+    if (!allowClear) return false
     // 离线好友的 presence 通常不携带签名。此时保留上次解析到的头像缓存，
     // 只有在线好友明确没有隐藏 URL 时，才认为对方取消了自定义头像。
     if (isFriendOffline(friend)) return false
@@ -299,6 +376,7 @@ function shouldRestoreOwnAvatarStatus(statusMessage: string | null | undefined):
   if (!savedAvatarUrl) return false
 
   return decodeAvatarStatusPayload(statusMessage) !== savedAvatarUrl
+    || !hasCurrentAvatarStatusPayload(statusMessage, savedAvatarUrl)
 }
 
 function ensureOwnAvatarStatusPayload(statusMessage?: string | null) {
@@ -368,11 +446,21 @@ function refreshFriendAvatarCache(forceAll: boolean, reason: string) {
   friendPuuidMapPromise = lcu.getFriends()
     .then((friends) => {
       const nextPuuids = updateFriendPuuidIndexes(friends)
+      const advertisedAvatarCount = friends.reduce(
+        (count, friend) => count + (decodeAvatarStatusPayload(friend.statusMessage) ? 1 : 0),
+        0,
+      )
 
       knownFriendPuuids.clear()
       nextPuuids.forEach((puuid) => knownFriendPuuids.add(puuid))
 
-      logger.info('[CustomAvatarSync] 好友列表刷新：%s，好友 PUUID %d 个，forceAll=%s', reason, nextPuuids.size, forceAll)
+      logger.info(
+        '[CustomAvatarSync] 好友列表刷新：%s，好友 PUUID %d 个，携带头像 %d 个，forceAll=%s',
+        reason,
+        nextPuuids.size,
+        advertisedAvatarCount,
+        forceAll,
+      )
     })
     .catch((err) => {
       friendPuuidMapUpdatedAt = 0
@@ -568,6 +656,9 @@ function restoreFriendAvatar(image: HTMLImageElement): boolean {
   const original = originalFriendImageSrc.get(image)
   if (original == null) image.removeAttribute('src')
   else image.setAttribute('src', original)
+  const originalReferrerPolicy = originalFriendImageReferrerPolicy.get(image)
+  if (originalReferrerPolicy == null) image.removeAttribute('referrerpolicy')
+  else image.setAttribute('referrerpolicy', originalReferrerPolicy)
   patchedFriendImages.delete(image)
   patchedFriendImagePuuid.delete(image)
   return true
@@ -578,9 +669,15 @@ function patchFriendAvatar(image: HTMLImageElement, avatarUrl: string, puuid: st
 
   if (!originalFriendImageSrc.has(image)) {
     originalFriendImageSrc.set(image, image.getAttribute('src'))
+    originalFriendImageReferrerPolicy.set(image, image.getAttribute('referrerpolicy'))
   }
 
-  if (image.getAttribute('src') === avatarUrl) return false
+  let changed = false
+  if (/^https?:\/\//i.test(avatarUrl) && image.getAttribute('referrerpolicy') !== 'no-referrer') {
+    image.setAttribute('referrerpolicy', 'no-referrer')
+    changed = true
+  }
+  if (image.getAttribute('src') === avatarUrl) return changed
 
   image.setAttribute('src', avatarUrl)
   patchedFriendImages.add(image)
@@ -770,11 +867,16 @@ function applyCustomAvatar(): boolean {
     }
   })
 
-  queryFriendAvatarCandidates().forEach(({ image, puuid }) => {
+  const friendCandidates = queryFriendAvatarCandidates()
+  let mappedFriendCandidates = 0
+  let matchedRemoteAvatars = 0
+  friendCandidates.forEach(({ image, puuid }) => {
     if (!puuid) return
+    mappedFriendCandidates++
 
     const avatarUrl = getAvatarUrlForPuuid(puuid)
     if (avatarUrl) {
+      matchedRemoteAvatars++
       const patched = patchFriendAvatar(image, avatarUrl, puuid)
       changed = patched || changed
     } else if (avatarUrl === null && patchedFriendImagePuuid.get(image) === puuid) {
@@ -782,6 +884,17 @@ function applyCustomAvatar(): boolean {
       changed = restored || changed
     }
   })
+  const friendScanSignature = `${friendCandidates.length}:${mappedFriendCandidates}:${matchedRemoteAvatars}:${patchedFriendImages.size}`
+  if (friendScanSignature !== lastFriendAvatarScanSignature) {
+    lastFriendAvatarScanSignature = friendScanSignature
+    logger.debug(
+      '[CustomAvatarSync] 好友栏扫描：候选=%d，已映射 PUUID=%d，命中头像=%d，已替换=%d',
+      friendCandidates.length,
+      mappedFriendCandidates,
+      matchedRemoteAvatars,
+      patchedFriendImages.size,
+    )
+  }
 
   queryRegaliaAvatarElements().forEach(({ element, puuid }) => {
     const avatarUrl = getAvatarUrlForPuuid(puuid)
@@ -869,14 +982,13 @@ function enableCustomAvatar() {
     friendAvatarUnsub = lcu.observe(FRIENDS_URI, (event) => {
       const friend = getFriendFromWsData(event.data)
       const puuid = normalizePuuid(friend?.puuid)
-      if (friend && updateRemoteAvatarFromFriendStatus(friend)) {
+      if (friend && updateRemoteAvatarFromFriendStatus(friend, false)) {
         scheduleApplyCustomAvatar()
       }
       if (friend && puuid && !knownFriendPuuids.has(puuid)) {
         indexFriendPuuid(friend)
         knownFriendPuuids.add(puuid)
         logger.info('[CustomAvatarSync] 好友 WS 捕获新增 PUUID：%s', puuid)
-        return
       }
 
       scheduleFriendAvatarRefresh('friends-ws-update')
@@ -928,7 +1040,9 @@ function disableCustomAvatar() {
     friendAvatarRefreshTimer = null
   }
   friendPuuidByName.clear()
+  friendPuuidByChatId.clear()
   knownFriendPuuids.clear()
+  lastFriendAvatarScanSignature = ''
   friendPuuidMapPromise = null
   friendPuuidMapUpdatedAt = 0
 
@@ -975,9 +1089,27 @@ export async function syncCustomAvatarAssetPath(assetPath: string) {
     const image = await assetResponse.blob()
     const sourceFileName = assetPath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) || 'image.png'
     const avatarUrl = await uploadImageToHostingService(image, sourceFileName)
+    await assertRemoteAvatarLoadable(avatarUrl)
+
+    // CHAT_ME 的写入事件会触发 ensureOwnAvatarStatusPayload。必须先把目标 URL
+    // 登记到缓存，否则监听器会拿旧 URL 把刚写入的新 payload 覆盖回去。
+    const previousAvatarUrl = remoteAvatarCache.get(ownPuuid)
     remoteAvatarCache.set(ownPuuid, avatarUrl)
     persistRemoteAvatarCacheEntry(ownPuuid, avatarUrl)
-    await writeAvatarUrlToStatusMessage(avatarUrl, getSavedOwnVisibleStatusMessage())
+    try {
+      await writeAvatarUrlToStatusMessage(avatarUrl, getSavedOwnVisibleStatusMessage())
+    } catch (error) {
+      if (previousAvatarUrl) {
+        remoteAvatarCache.set(ownPuuid, previousAvatarUrl)
+        persistRemoteAvatarCacheEntry(ownPuuid, previousAvatarUrl)
+      } else {
+        remoteAvatarCache.delete(ownPuuid)
+        persistRemoteAvatarCacheEntry(ownPuuid, null)
+      }
+      throw error
+    }
+
+    logger.info('[CustomAvatarSync] 新头像 payload 已替换并通过延迟回读校验。')
     scheduleApplyCustomAvatar()
     await lcu.sendNotification(translate('notification.avatarSync.title'), translate('notification.avatarSync.details')).catch(() => {})
 

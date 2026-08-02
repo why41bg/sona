@@ -49,6 +49,7 @@ import {
   shouldSkipSonaStrengthGame,
   type SonaPlayerStrengthScore,
 } from '@/lib/player-strength-score'
+import { deobfuscateChampSelectPuuid } from '@/lib/champ-select-puuid'
 import { translate } from '@/i18n'
 
 // ==================== 共享：查询队友胜率 ====================
@@ -59,6 +60,8 @@ interface TeammateStats {
   floor: number
   summonerId: number
   puuid: string
+  obfuscatedSummonerId: number
+  obfuscatedPuuid: string
   gameName: string
   tagLine: string
   winRate: number | null  // null = 查询失败或无战绩
@@ -78,16 +81,31 @@ interface TeamStatsResult {
   fetchCount: number
 }
 
-function getPlayerStatsKey(player: Pick<ChampSelectTeamPlayer, 'puuid' | 'summonerId' | 'cellId'>): string {
+function getPlayerStatsKey(player: Pick<ChampSelectTeamPlayer, 'puuid' | 'summonerId' | 'obfuscatedPuuid' | 'obfuscatedSummonerId' | 'cellId'>): string {
   if (player.puuid) return `puuid:${player.puuid}`
   if (player.summonerId) return `summoner:${player.summonerId}`
+  if (player.obfuscatedPuuid) return `obfuscated-puuid:${player.obfuscatedPuuid}`
+  if (player.obfuscatedSummonerId) return `obfuscated-summoner:${player.obfuscatedSummonerId}`
   return `cell:${player.cellId}`
 }
 
 function getTeammateStatsKey(stat: TeammateStats): string {
+  // 匿名模式下优先使用会话中的混淆 ID，换楼后仍可与最新 session 稳定对应。
+  if (stat.obfuscatedPuuid) return `obfuscated-puuid:${stat.obfuscatedPuuid}`
+  if (stat.obfuscatedSummonerId) return `obfuscated-summoner:${stat.obfuscatedSummonerId}`
   if (stat.puuid) return `puuid:${stat.puuid}`
   if (stat.summonerId) return `summoner:${stat.summonerId}`
   return `floor:${stat.floor}`
+}
+
+/**
+ * 正常模式直接使用 puuid；匿名模式则还原 obfuscatedPuuid。
+ * 只处理 HIDDEN，避免未来客户端引入其他可见性类型时误判。
+ */
+function resolveChampSelectPuuid(player: ChampSelectTeamPlayer): string {
+  if (player.puuid) return player.puuid
+  if (player.nameVisibilityType !== 'HIDDEN' || !player.obfuscatedPuuid) return ''
+  return deobfuscateChampSelectPuuid(player.obfuscatedPuuid)
 }
 
 /** 去重：同一个 ChampSelect 阶段多个功能需要同一份数据时，复用同一轮请求 */
@@ -129,11 +147,13 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
     store.get('analyzeTeamPowerFetchCount') || 50,
   )
 
-  /** 构造占位元素：主播模式下队友 puuid 为空，无法查询战绩 */
-  const placeholder = (player: ChampSelectTeamPlayer, i: number): TeammateStats => ({
+  /** 构造占位元素：查询失败时仍保留两套 ID，供换楼后的稳定匹配使用 */
+  const placeholder = (player: ChampSelectTeamPlayer, i: number, resolvedPuuid = resolveChampSelectPuuid(player)): TeammateStats => ({
     floor: i + 1,
     summonerId: player.summonerId,
-    puuid: player.puuid,
+    puuid: resolvedPuuid,
+    obfuscatedSummonerId: player.obfuscatedSummonerId,
+    obfuscatedPuuid: player.obfuscatedPuuid,
     gameName: player.gameName,
     tagLine: player.tagLine,
     winRate: null,
@@ -148,14 +168,20 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
 
   // 跳过查不到数据的占位玩家（斗魂模式 myTeam 含空位），其余保留占位以对齐楼层索引
   const analyzablePlayers = getAnalyzableTeamPlayers(session)
+  const hiddenPlayers = analyzablePlayers.filter((player) => player.nameVisibilityType === 'HIDDEN' && !player.puuid)
+  if (hiddenPlayers.length > 0) {
+    const resolvedCount = hiddenPlayers.filter((player) => Boolean(resolveChampSelectPuuid(player))).length
+    logger.info('[TeamStats] 匿名模式身份还原: %d/%d', resolvedCount, hiddenPlayers.length)
+  }
+
   const stats = await Promise.all(analyzablePlayers.map(async (player, i) => {
-    // 主播模式下队友 puuid 为空（但有 obfuscatedPuuid），跳过查询，直接返回占位
-    if (!player.puuid) {
-      return placeholder(player, i)
+    const puuid = resolveChampSelectPuuid(player)
+    if (!puuid) {
+      logger.warn('[TeamStats] %d楼缺少可查询的 PUUID（visibility=%s）', i + 1, player.nameVisibilityType || 'unknown')
+      return placeholder(player, i, '')
     }
 
     try {
-      const puuid = player.puuid
       const gameName = player.gameName
       const tagLine = player.tagLine
 
@@ -184,7 +210,7 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
       }
 
       if (matchStats.length === 0) {
-        return placeholder(player, i)
+        return placeholder(player, i, puuid)
       }
 
       let wins = 0, totalKills = 0, totalDeaths = 0, totalAssists = 0
@@ -210,6 +236,8 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
         floor: i + 1,
         summonerId: player.summonerId,
         puuid,
+        obfuscatedSummonerId: player.obfuscatedSummonerId,
+        obfuscatedPuuid: player.obfuscatedPuuid,
         gameName,
         tagLine,
         winRate: (wins / total) * 100,
@@ -221,8 +249,9 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
         kdaNum: totalDeaths === 0 ? totalKills + totalAssists : (totalKills + totalAssists) / totalDeaths,
         strengthScore,
       } as TeammateStats
-    } catch {
-      return placeholder(player, i)
+    } catch (error) {
+      logger.warn('[TeamStats] %d楼战绩查询失败（visibility=%s）:', i + 1, player.nameVisibilityType || 'unknown', error)
+      return placeholder(player, i, puuid)
     }
   }))
 
@@ -247,6 +276,10 @@ let floorStats: TeammateStats[] = []
 let statsByPuuid = new Map<string, TeammateStats>()
 /** summonerId → TeammateStats 映射，用于 puuid 不可用时兜底匹配 */
 let statsBySummonerId = new Map<number, TeammateStats>()
+/** obfuscatedPuuid → TeammateStats 映射，用于匿名模式换楼后的稳定匹配 */
+let statsByObfuscatedPuuid = new Map<string, TeammateStats>()
+/** obfuscatedSummonerId → TeammateStats 映射，作为匿名模式的第二层兜底 */
+let statsByObfuscatedSummonerId = new Map<number, TeammateStats>()
 /** 当前 DOM 展示顺序签名，用于位置互换后触发重绑 */
 let currentChampSelectTeamSignature = ''
 /** 当前选人阶段的队列 ID，用于打开战绩弹窗时自动过滤 */
@@ -319,6 +352,8 @@ function getTeamDisplaySignature(session: ChampSelectSession): string {
 function getCachedStatsForPlayer(player: ChampSelectTeamPlayer, floor: number): TeammateStats {
   const cached = (player.puuid ? statsByPuuid.get(player.puuid) : undefined)
     ?? (player.summonerId ? statsBySummonerId.get(player.summonerId) : undefined)
+    ?? (player.obfuscatedPuuid ? statsByObfuscatedPuuid.get(player.obfuscatedPuuid) : undefined)
+    ?? (player.obfuscatedSummonerId ? statsByObfuscatedSummonerId.get(player.obfuscatedSummonerId) : undefined)
 
   if (cached) {
     return {
@@ -328,13 +363,17 @@ function getCachedStatsForPlayer(player: ChampSelectTeamPlayer, floor: number): 
       tagLine: player.tagLine || cached.tagLine,
       puuid: player.puuid || cached.puuid,
       summonerId: player.summonerId || cached.summonerId,
+      obfuscatedPuuid: player.obfuscatedPuuid || cached.obfuscatedPuuid,
+      obfuscatedSummonerId: player.obfuscatedSummonerId || cached.obfuscatedSummonerId,
     }
   }
 
   return {
     floor,
     summonerId: player.summonerId,
-    puuid: player.puuid,
+    puuid: resolveChampSelectPuuid(player),
+    obfuscatedSummonerId: player.obfuscatedSummonerId,
+    obfuscatedPuuid: player.obfuscatedPuuid,
     gameName: player.gameName,
     tagLine: player.tagLine,
     winRate: null,
@@ -497,6 +536,8 @@ function unregisterTierInjection() {
   floorStats = []
   statsByPuuid.clear()
   statsBySummonerId.clear()
+  statsByObfuscatedPuuid.clear()
+  statsByObfuscatedSummonerId.clear()
   currentChampSelectTeamSignature = ''
   currentChampSelectQueueId = 0
 
@@ -517,9 +558,13 @@ async function applyChampSelectIconEffects() {
     // 建立 puuid → stats 映射，换楼后可用新 myTeam 顺序重建 floorStats
     statsByPuuid.clear()
     statsBySummonerId.clear()
+    statsByObfuscatedPuuid.clear()
+    statsByObfuscatedSummonerId.clear()
     for (const s of stats) {
       if (s.puuid) statsByPuuid.set(s.puuid, s)
       if (s.summonerId) statsBySummonerId.set(s.summonerId, s)
+      if (s.obfuscatedPuuid) statsByObfuscatedPuuid.set(s.obfuscatedPuuid, s)
+      if (s.obfuscatedSummonerId) statsByObfuscatedSummonerId.set(s.obfuscatedSummonerId, s)
     }
     currentChampSelectTeamSignature = stats.map(getTeammateStatsKey).join('|')
     registerTierInjection()
@@ -542,7 +587,12 @@ function onChampSelectUpdate(event: LCUEventMessage) {
   // 只处理 Update 事件
   if (event.eventType !== 'Update') return
   // 数据还没准备好就不处理
-  if (statsByPuuid.size === 0 && statsBySummonerId.size === 0) return
+  if (
+    statsByPuuid.size === 0
+    && statsBySummonerId.size === 0
+    && statsByObfuscatedPuuid.size === 0
+    && statsByObfuscatedSummonerId.size === 0
+  ) return
 
   const session = event.data as ChampSelectSession
   if (!session?.myTeam) return
@@ -953,6 +1003,7 @@ export function initFeatures() {
 
   updateAutoBanChampion(store.get('autoBanChampion'))
   store.onChange('autoBanChampion', updateAutoBanChampion)
+  store.onChange('autoBanChampionIds', () => updateAutoBanChampion(store.get('autoBanChampion')))
 
   updateBalanceBuffTooltip(store.get('balanceBuffTooltip'))
   store.onChange('balanceBuffTooltip', updateBalanceBuffTooltip)
