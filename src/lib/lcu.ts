@@ -43,6 +43,7 @@ import type {
 } from '@/types/lcu'
 import { SGP_SERVERS, TENCENT_MATCH_HISTORY_INTEROP } from '@/types/sgp'
 import type { SgpEntitlementsToken, SgpGameSummaryLol, SgpMatchHistoryLol, SgpParticipantLol, SgpPerks, SgpTeam } from '@/types/sgp'
+import { deobfuscateChampSelectPuuid } from '@/lib/champ-select-puuid'
 import { store } from '@/lib/store'
 
 // Re-export types for convenience
@@ -891,15 +892,21 @@ class LCUManager {
   }> {
     const session = await this.getChampSelectSession()
 
-    const fetchDetail = async (player: { summonerId: number; championId: number; assignedPosition: string }): Promise<ChampSelectPlayerDetail> => {
+    const fetchDetail = async (player: ChampSelectSession['myTeam'][number]): Promise<ChampSelectPlayerDetail> => {
+      const resolvedPuuid = player.puuid
+        || (player.nameVisibilityType === 'HIDDEN'
+          ? deobfuscateChampSelectPuuid(player.obfuscatedPuuid)
+          : '')
       try {
-        const summoner = await this.getSummonerById(player.summonerId)
+        const summoner = resolvedPuuid
+          ? await this.getSummonerByPuuid(resolvedPuuid)
+          : await this.getSummonerById(player.summonerId)
         const [ranked, matchHistory] = await Promise.all([
           this.getRankedStats(summoner.puuid).catch(() => null),
           this.getMatchHistory(summoner.puuid, 0, 19).catch(() => null),
         ])
         return {
-          summonerId: player.summonerId,
+          summonerId: player.summonerId || summoner.summonerId,
           championId: player.championId,
           assignedPosition: player.assignedPosition,
           gameName: summoner.gameName,
@@ -915,10 +922,10 @@ class LCUManager {
           summonerId: player.summonerId,
           championId: player.championId,
           assignedPosition: player.assignedPosition,
-          gameName: 'Unknown',
-          tagLine: '',
+          gameName: player.gameName || 'Unknown',
+          tagLine: player.tagLine,
           summonerLevel: 0,
-          puuid: '',
+          puuid: resolvedPuuid,
           profileIconId: 0,
           ranked: null,
           recentMatches: null,

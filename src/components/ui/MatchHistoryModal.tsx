@@ -211,6 +211,7 @@ export interface MatchHistoryModalProps {
  */
 export function MatchHistoryModal({ open, onClose, puuid, playerName, queueId: defaultQueueId }: MatchHistoryModalProps) {
   const { t } = useI18n()
+  const [resolvedPlayerName, setResolvedPlayerName] = useState(playerName)
   const [matches, setMatches] = useState<MatchRowData[]>([])
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -226,6 +227,33 @@ export function MatchHistoryModal({ open, onClose, puuid, playerName, queueId: d
   const cleanupScroll = useRef<(() => void) | null>(null)
   const INITIAL_FETCH = 20
   const MORE_FETCH = 20
+
+  // 调用方可能只有从匿名会话还原出的 PUUID，传入的名字会是空串或单独的 "#"。
+  // 弹窗自身再做一层兜底，保证所有入口都能用真实 PUUID 回填 Riot ID。
+  useEffect(() => {
+    const providedName = playerName.trim()
+    const hasUsableProvidedName = Boolean(providedName.replace(/#/g, '').trim())
+    setResolvedPlayerName(hasUsableProvidedName ? providedName : t('common.unknown'))
+
+    if (!open || !puuid || hasUsableProvidedName) return
+
+    let cancelled = false
+    void lcu.getSummonerByPuuid(puuid)
+      .then((summoner) => {
+        if (cancelled) return
+        const riotId = summoner.gameName
+          ? `${summoner.gameName}${summoner.tagLine ? `#${summoner.tagLine}` : ''}`
+          : summoner.displayName
+        if (riotId) setResolvedPlayerName(riotId)
+      })
+      .catch(() => {
+        // 战绩查询本身不依赖名字；回填失败时保留“未知”，不影响主流程。
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, playerName, puuid, t])
 
   // 可玩队列缓存
   const [queueOptions, setQueueOptions] = useState<{ id: number; name: string }[]>([])
@@ -358,7 +386,7 @@ export function MatchHistoryModal({ open, onClose, puuid, playerName, queueId: d
     <Modal open={open} onClose={onClose} width={860} height={620}>
       <div className="smh-container">
         <div className="smh-header">
-          <span className="smh-title">{t('matchHistory.title', { playerName })}</span>
+          <span className="smh-title">{t('matchHistory.title', { playerName: resolvedPlayerName })}</span>
           <div className="smh-filter" ref={filterRef}>
             <button
               className={`smh-filter-trigger${filterOpen ? ' smh-filter-trigger--open' : ''}`}

@@ -1,4 +1,5 @@
 import { logger } from '@/index'
+import { deobfuscateChampSelectPuuid } from '@/lib/champ-select-puuid'
 import { injector } from '@/lib/InjectorManager'
 import { lcu, LcuEventUri } from '@/lib/lcu'
 import type { ChampSelectSession, ChatFriend, GameflowPhase, LCUEventMessage, Lobby } from '@/lib/lcu'
@@ -548,9 +549,13 @@ function updateChampSelectSession(session: ChampSelectSession | null) {
       const riotId = normalize(player.gameName && player.tagLine
         ? `${player.gameName}#${player.tagLine}`
         : '')
+      const resolvedPuuid = player.puuid
+        || (player.nameVisibilityType === 'HIDDEN'
+          ? deobfuscateChampSelectPuuid(player.obfuscatedPuuid)
+          : '')
       return {
         isSelf: player.cellId === session.localPlayerCellId,
-        puuid: normalize(player.puuid),
+        puuid: normalize(resolvedPuuid),
         summonerId: normalizeId(player.summonerId),
         names: [gameName, riotId].filter(Boolean),
       }

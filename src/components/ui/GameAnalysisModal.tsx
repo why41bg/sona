@@ -259,8 +259,8 @@ export function GameAnalysisModal({ open, onClose, mockData }: GameAnalysisModal
             isBroadcaster,
           }
 
-          // 主播模式：有真实 puuid，可以查询数据，但名字隐藏
-          // 非主播模式：正常查询
+          // 匿名模式：selections 仍提供真实 PUUID，统一从 Summoner 接口回填 Riot ID。
+          // 非匿名模式也走同一链路，避免 gameflow 中名字字段为空造成标题缺失。
           try {
             const [summoner, ranked, sgpResp] = await Promise.all([
               lcu.getSummonerByPuuid(p.puuid).catch(() => null),
