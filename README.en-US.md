@@ -78,12 +78,15 @@ Sona focuses on practical quality-of-life improvements: champion select tools, m
 
 |  | Feature | Description |
 |:---:|---|---|
-| ⚡ | **Auto Accept** | Automatically accepts queue pop. |
+| ⚡ | **Auto Accept** | Automatically accepts queue pop, with an optional random delay and the ability to decline after accepting. |
 | 🎯 | **Auto Pick / Auto Ban Queue** | Configure multiple candidate champions. Sona skips unavailable champions by priority. |
 | 🔄 | **ARAM Bench No Cooldown** | Removes bench swap cooldown in ARAM. |
-| 📊 | **Team Power Analysis** | Analyzes teammate recent performance and can send a compact report to champion-select chat. |
+| 🔵 | **Side Indicator** | Reports whether your team is blue side or red side in champion-select chat. |
+| 📊 | **Team Power Analysis** | Uses matches from the current mode to calculate win rate, KDA, and a `3.0–16.0` strength score. |
 | 🌟 | **Champion Select Assist** | Shows teammate win rate, KDA, particles, champion tier badges, and clickable match history. |
+| 🔒 | **Privacy / Streamer Mode Support** | Keeps teammate analysis working when names are hidden, restores real names beside client aliases, and tracks player swaps. |
 | 📈 | **Game Analysis Popup** | Displays team strength analysis after entering game, including win rate, KDA, rank, and premade groups. |
+| 🚪 | **Champion Select Quit Button** | Adds a quick exit button to non-custom champion select so you can return to the lobby. |
 | 🔁 | **Auto Return to Lobby** | Returns to lobby after a game, with optional auto queue and retry logic. |
 | 🛡️ | **Balance Buff Tooltip** | Shows mode-specific champion balance modifiers in ARAM and other supported modes. |
 | 👍 | **Auto Honor** | Randomly honors teammates after the game. |
@@ -94,8 +97,10 @@ Sona focuses on practical quality-of-life improvements: champion select tools, m
 |  | Feature | Description |
 |:---:|---|---|
 | 🧠 | **Smart Builds, Runes and Summoner Spells** | Automatically syncs item sets after champion lock-in and remembers manually saved runes and spells per champion/mode. |
-| 🧰 | **OP.GG Recommendation Panel** | Shows recommended items, runes, summoner spells, augments, and matchups during champion select. |
+| 🧭 | **Position-aware Recommendations** | Uses your assigned role in ranked, the champion's most common role elsewhere, and offers a Top/Jungle/Mid/ADC/Support selector. |
+| 🧰 | **OP.GG Recommendation Panel** | Shows mode-aware items, runes, summoner spells, augments, and matchups during champion select. |
 | 📦 | **Managed Item Sets** | Creates Sona-managed client item sets while preserving user-created item sets. |
+| 🛟 | **Multi-mode Fallbacks** | Supports standard and special modes and fills missing recommendation sections from available data. |
 
 ### Match History
 
@@ -111,6 +116,7 @@ Sona focuses on practical quality-of-life improvements: champion select tools, m
 |  | Feature | Description |
 |:---:|---|---|
 | ✏️ | **Unlock Status Message** | Removes the client-side lock from status editing. |
+| 📱 | **Enhanced Availability** | Supports extra statuses such as offline and mobile, with startup restore. |
 | 🖼️ | **Custom Profile Background** | Use any skin as your profile background, with search and lazy loading. |
 | 🎏 | **Custom Banner** | Locally display any challenge banner. |
 | 👥 | **Premade Friend Marker** | Marks friends in the same premade with matching colors. |
@@ -125,9 +131,12 @@ Sona focuses on practical quality-of-life improvements: champion select tools, m
 |:---:|---|---|
 | 🎨 | **Beautify Page** | A dedicated page for client visual customization. |
 | 🖼️ | **Custom Home Wallpaper** | Use images or videos from `assets` as the home background. Supports blur, tint, crop, and positioning. |
+| 🪄 | **Wallpaper Mode and Scene Glass** | Hides home activity content, clears sidebar backgrounds, and adjusts blur/tint for mode-select and lobby scenes. |
 | 🎲 | **Random Wallpaper** | Randomly applies one wallpaper on each client start while avoiding immediate repeats when possible. |
-| 🧑‍🎤 | **Custom Avatars** | Manage multiple local avatar assets, switch with one click, and sync avatars to friends through hidden zero-width status payloads. |
-| 🌈 | **Theme Color** | Change the global client `--default-color` variable and reset it at any time. |
+| 🧊 | **Friends Sidebar Glass** | Independently adjusts the social sidebar blur and tint. |
+| 🧭 | **Top Navigation Styling** | Adjusts navbar blur and optionally hides icon separators and the bottom border. |
+| 🧑‍🎤 | **Custom Avatars** | Manage multiple local avatars and sync them between friends who both use Sona, with an offline cache fallback. |
+| 🌈 | **Flowing Summoner Names** | Configures a smooth looping gradient and syncs it across the friends list, lobby, and champion select. |
 | 📦 | **Asset Manager** | Records paths under `assets` and can normalize absolute paths containing `sona/assets`. |
 
 ### Tools and Interface
@@ -136,11 +145,16 @@ Sona focuses on practical quality-of-life improvements: champion select tools, m
 |:---:|---|---|
 | 🎬 | **Replay Tool** | Download and watch replays by Game ID. |
 | 💾 | **Settings Backup** | Back up and restore client settings by account. |
+| 🎁 | **Selective Battle Pass Rewards** | Review pending choice rewards and claim only the items you select. |
 | 🪟 | **Window Effects** | Blur, acrylic, mica, and other visual effects depending on platform support. |
 | ✨ | **Global Particles** | Adds star-like particles to the client background. |
-| 📱 | **Enhanced Availability** | Supports extra statuses such as offline and mobile, with startup restore. |
+| 🚀 | **Quick Lobby** | Skips mode selection from Play and opens a configured queue lobby directly. |
+| 🗂️ | **Game Mode Filter** | Hides unwanted queue entries from the PvP mode-selection page. |
+| 🧹 | **Client UI Cleanup** | Can hide the TFT entry, right-navbar labels, and esports broadcast popup. |
+| 🎨 | **Restore Chromas Tab** | Restores the hidden Chromas sub-tab on supported collection pages. |
+| 🔔 | **Update Checker** | Checks releases on startup and lets you open or skip a new version. |
 | 🌐 | **Internationalization** | Supports Simplified Chinese, English, and automatic language detection. |
-| 🔧 | **Debug Panel** | LCU API, chat, replay, OP.GG, language, and asset debugging tools for advanced users. |
+| 🔧 | **Debug Panel** | LCU, chat, replay, builds, status-payload inspection, and mock game-analysis tools for advanced users. |
 
 ## Screenshots
 
@@ -231,9 +245,10 @@ Core modules:
 
 1. Sona requires Pengu Loader and cannot run standalone.
 2. Sona communicates with the League Client through LCU APIs. It does not modify game files or inject into the game process.
-3. Custom avatars use user-selected local assets, image hosting, hidden zero-width status payloads, and local friend-cache fallback for offline friends.
-4. Some features depend on client state, region, queue type, or third-party API availability and may not always return data.
-5. Rank disguise only affects friend-card display and does not alter real ranked data.
+3. Custom avatars and flowing names use hidden status payloads; both friends need Sona enabled to see each other's synchronized effects.
+4. Build recommendations use third-party data sources such as OP.GG and ARAM.GG, while client actions go through LCU APIs and DOM integration.
+5. Some features depend on client state, region, queue type, or third-party API availability and may not always return data.
+6. Rank disguise only affects friend-card display and does not alter real ranked data.
 
 ## Development
 
